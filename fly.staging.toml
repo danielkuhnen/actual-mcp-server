@@ -1,0 +1,57 @@
+# Fly.io config for the Fiwell v2 staging MCP server.
+# Builds this fork's Dockerfile and serves the MCP over HTTPS at
+# https://fiwell-v2-mcp-staging.fly.dev/http, read-only, against the
+# Fiwell v2 staging sync-server (fiwell-v2-staging).
+#
+# Secrets (set with `fly secrets set -a fiwell-v2-mcp-staging ...`):
+#   ACTUAL_PASSWORD        sync-server password
+#   ACTUAL_BUDGET_SYNC_ID  budget Sync ID (Settings > Advanced > Sync ID)
+#   MCP_SSE_AUTHORIZATION  Bearer token clients send, at least 32 characters
+#   ACTUAL_BUDGET_PASSWORD only if the budget is end-to-end encrypted
+#
+# Deploy: fly deploy -c fly.staging.toml
+
+app = 'fiwell-v2-mcp-staging'
+primary_region = 'cdg'
+
+[build]
+  dockerfile = 'Dockerfile'
+
+  [build.args]
+    VERSION = '0.27.1-fiwell'
+
+[deploy]
+  strategy = 'immediate'
+
+[env]
+  ACTUAL_SERVER_URL = 'https://fiwell-v2-staging.fly.dev'
+  # Hides and refuses every write tool. Change only after deciding to allow writes.
+  MCP_READ_ONLY = 'true'
+  MCP_BRIDGE_PORT = '3600'
+  MCP_BRIDGE_PUBLIC_HOST = 'fiwell-v2-mcp-staging.fly.dev'
+  MCP_BRIDGE_PUBLIC_SCHEME = 'https'
+  MCP_BRIDGE_LOG_LEVEL = 'info'
+
+# Local copy of the budget that @actual-app/api works on. One machine only:
+# two processes must never share a data dir.
+[[mounts]]
+  source = 'fiwell_v2_mcp_staging_data'
+  destination = '/app/data'
+
+[http_service]
+  internal_port = 3600
+  force_https = true
+  auto_stop_machines = 'stop'
+  auto_start_machines = true
+  min_machines_running = 0
+
+  [[http_service.checks]]
+    interval = '30s'
+    timeout = '5s'
+    grace_period = '30s'
+    method = 'GET'
+    path = '/health'
+
+[[vm]]
+  size = 'shared-cpu-1x'
+  memory = '1gb'

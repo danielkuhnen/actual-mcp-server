@@ -3,10 +3,17 @@
 # https://fiwell-v2-mcp-staging.fly.dev/http, read-only, against the
 # Fiwell v2 staging sync-server (fiwell-v2-staging).
 #
+# Clients sign in with OAuth through Auth0: the server validates Auth0 JWT
+# access tokens issued for the Auth0 API whose identifier is OIDC_RESOURCE.
+# The MCP itself still logs in to the sync-server with its password, which
+# keeps working when the sync-server's own login is switched to OpenID.
+#
 # Secrets (set with `fly secrets set -a fiwell-v2-mcp-staging ...`):
 #   ACTUAL_PASSWORD        sync-server password
 #   ACTUAL_BUDGET_SYNC_ID  budget Sync ID (Settings > Advanced > Sync ID)
-#   MCP_SSE_AUTHORIZATION  Bearer token clients send, at least 32 characters
+#   OIDC_ISSUER            Auth0 issuer with its trailing slash, https://<tenant>.auth0.com/
+#   AUTH_BUDGET_ACL        who may read which budget, {"<Auth0 user_id>":["<Sync ID>"]}.
+#                          Required: unset or {} lets every Auth0 user read every budget.
 #   ACTUAL_BUDGET_PASSWORD only if the budget is end-to-end encrypted
 #
 # Deploy: fly deploy -c fly.staging.toml
@@ -27,6 +34,8 @@ primary_region = 'cdg'
   ACTUAL_SERVER_URL = 'https://fiwell-v2-staging.fly.dev'
   # Hides and refuses every write tool. Change only after deciding to allow writes.
   MCP_READ_ONLY = 'true'
+  AUTH_PROVIDER = 'oidc'
+  OIDC_RESOURCE = 'https://fiwell-v2-mcp-staging.fly.dev/http'
   MCP_BRIDGE_PORT = '3600'
   MCP_BRIDGE_PUBLIC_HOST = 'fiwell-v2-mcp-staging.fly.dev'
   MCP_BRIDGE_PUBLIC_SCHEME = 'https'

@@ -19,8 +19,25 @@ Fiwell-specific should go upstream as a pull request instead.
 | File | Purpose |
 |------|---------|
 | `FIWELL.md` | This page |
-| `fly.staging.toml` | Fly.io app `fiwell-v2-mcp-staging` (region cdg), read-only, pointing at `https://fiwell-v2-staging.fly.dev` |
+| `fly.staging.toml` | Fly.io app `fiwell-v2-mcp-staging` (region cdg), read-only, pointing at `https://fiwell-v2-staging.fly.dev`, sign-in through Auth0 |
 | `.github/workflows/fiwell-staging-deploy.yml` | Deploys to Fly on every push to `fiwell` |
+
+## Sign-in through Auth0
+
+Clients such as claude.ai sign in with OAuth (`AUTH_PROVIDER=oidc`) against Fiwell's Auth0
+tenant. Auth0 needs:
+
+- An API whose identifier is exactly `https://fiwell-v2-mcp-staging.fly.dev/http`
+  (`OIDC_RESOURCE`), so access tokens are JWTs with that audience.
+- The tenant's Resource Parameter Compatibility Profile turned on, so the `resource`
+  parameter MCP clients send is treated as the audience.
+- An application for Claude (Regular Web Application) with the callback
+  `https://claude.ai/api/mcp/auth_callback`. Its client ID and secret go into the claude.ai
+  connector's advanced settings, not into Fly.
+
+`AUTH_BUDGET_ACL` must list the Auth0 user ids allowed in. Everyone else who can sign in to
+the tenant gets no budget. Leaving it unset or `{}` would let every Auth0 user read every
+budget, because the server reaches Actual with the sync-server password.
 
 ## Updating to a new upstream release
 

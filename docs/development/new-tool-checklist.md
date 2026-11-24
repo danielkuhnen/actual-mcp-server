@@ -26,7 +26,10 @@ Use this file every time a new tool is added. Print or open it alongside your ed
 - [ ] Added to `IMPLEMENTED_TOOLS` in `src/actualToolsManager.ts`
 - [ ] **Added to the toolsets** (#603): Add the tool to exactly one `TOOLSETS` array in `src/lib/toolsets.ts`, and to `WRITE_CAPABLE` if it writes; then `npm run build && npm run docs:gen`. `tests/unit/toolsets.test.js` ("every registered tool belongs to exactly one toolset") fails if you skip it, and `docs:check` reports the README tools-summary block stale.
 - [ ] **Classified in `src/lib/tool-annotations.ts`** (#379): put it in exactly one of `READ_ONLY`, `DESTRUCTIVE` or `ADDITIVE`, and if it writes, decide idempotence. `npm run build && node tests/unit/tool_annotations.test.js` FAILS if you skip this (the guard reads `dist/`, so build first), and it checks the read-only claim against the adapter call graph
+- [ ] **Titled in `src/lib/tool-titles.ts`** (#641): add a sentence-case display title of 2 to 5 words, unique, with no leading "Actual", whose first word is a read verb (Get, List, Search...) exactly when the tool is read-only. `npm run build && node tests/unit/tool_titles.test.js` FAILS naming the tool if you skip this
 - [ ] Adapter function(s) exist (or created) in `src/lib/actual-adapter.ts`
+- [ ] **Optional: output schema** (#642): only when the tool's result is a JSON object (never an array), set `outputSchema` to a top-level `z.object({...}).loose()` (a root union, a `z.record` at any depth, and a closed object at any depth are refused by `tests/unit/tool_output_schema.test.js`; model alternative result shapes as optional or nullable properties of one object), describe every field, then add a `structuredContent` assertion (`mcp.raw`) to the E2E spec and re-measure `tests/unit/tools_list_size_budget.test.js`. `createTool()` wraps its result as `{ result }`, so the schema describes that wrapper. Leave it unset for every other tool
+- [ ] **Prompts that name the tool** (#660): a prompt in `src/prompts/` that names a new tool is added with that tool. Renaming or removing a tool must update every prompt's `requiredTools`, or the prompt silently disappears from `prompts/list` (it is offered only when every named tool is published).
 - [ ] `npm run build` passes with zero errors
 
 ### Unit Tests
@@ -81,7 +84,7 @@ Use this file every time a new tool is added. Print or open it alongside your ed
 
 **Location**: `src/tools/<domain>_<action>.ts`
 
-**Naming convention**: `actual_{domain}_{action}` (snake_case). Use the exact same name for:
+**Naming convention**: `actual_{domain}_{action}` in lower snake_case, never camelCase (#652: the six camelCase budget tools were renamed; `tests/unit/tool_name_case.test.js` fails on a new one). Use the exact same name for:
 - The file name (`<domain>_<action>.ts`)
 - The `name` field inside the tool definition
 - The entry in `IMPLEMENTED_TOOLS`
@@ -161,7 +164,7 @@ calling it.
       the `*_delete` family, `payees_merge`, `budgets_import`, and `accounts_close`, which
       REMOVES a zero-transaction account)? Is it **idempotent** (does calling it twice with
       the same arguments leave the same state)? Creates are not idempotent;
-      `budgets_holdForNextMonth` is not either, because upstream ADDS to the buffer.
+      `budgets_hold_for_next_month` is not either, because upstream ADDS to the buffer.
 - [ ] `openWorldHint` is handled for you: everything is a closed world except
       `actual_bank_sync`. Only touch `OPEN_WORLD` if your tool reaches a third-party service.
 - [ ] Run `npm run build && node tests/unit/tool_annotations.test.js`. The guard reads the
@@ -172,6 +175,14 @@ calling it.
 **Do not make any code in `src/` branch on an annotation.** The MCP spec says clients must
 treat annotations as untrusted, so they can never carry an authorisation or safety decision.
 Keep those in `budget-acl.ts` and the adapter guards.
+
+Then give the tool a display title in `src/lib/tool-titles.ts` (#641). Clients show it
+instead of `actual_x_y`, and Glama's quality score reads it.
+
+- [ ] Sentence case, 2 to 5 words, no leading "Actual", not used by any other tool.
+- [ ] The first word is a read verb (Get, List, Search, Summarize...) if and only if the
+      tool is in `READ_ONLY`.
+- [ ] Run `npm run build && node tests/unit/tool_titles.test.js`.
 
 ---
 
@@ -536,6 +547,29 @@ When implementing a new lookup tool, the `call` function should:
 1. Try to find the entity by name/id
 2. If not found, fetch the full list
 3. Return `{ error: "Not found", available: list.map(e => e.name) }`; **never** just `null` or an empty object
+
+---
+
+## Compact flow
+
+The default surface is `compact`: 15 tools over 85 operations (the prose says "15 tools over 85 operations"; the anchored literals stay 85, #680 R6, so `npm run tool-count -- --fix` leaves no diff). Design record: [../explanation/compact-tool-surface.md](../explanation/compact-tool-surface.md). Steps 1 to 9 above still apply to the legacy tool; the compact layer adds the following. The prompt files in `tests/manual-prompt/` name compact tools and selector values, not `actual_*` names, so read Step 6 with that substitution.
+
+### (a) A new operation on an existing compact tool
+
+1. Add the legacy tool as today: `src/tools/<name>.ts` with `createTool()`, the export in `src/tools/index.ts`, `IMPLEMENTED_TOOLS`, and `src/lib/toolsets.ts` (`TOOLSETS`, plus `WRITE_CAPABLE` if it writes). It stays registered, hidden under `compact`, until #682.
+2. Add an action row or route with its `legacy` mapping in `src/compact/tools/<tool>.ts`, and list the action in that tool's description.
+3. Run `node tests/unit/compact_mapping_parity.test.js`; it must be green.
+4. Add a compact E2E row to `tests/e2e/docker-all-tools.e2e.spec.ts` with its negative, a call in a `tests/manual/tests/*.js` module, and a prompt scenario naming the tool and its selector value on one line (for example `manage_tags, action: "create"`). The completeness guard (`tests/unit/new_tool_completeness.test.js`) enforces all three.
+5. If `tests/unit/tools_list_size_budget.test.js` fails, raise `COMPACT_TOTAL_CEILING` by the measured growth, with a comment saying why.
+6. Update `docs/reference/tools.md`, run `npm run build && npm run docs:gen`, run `npm run tool-count`, and update the mapping table in section 7 of the design record.
+
+### (a2) A change to a compact tool's description only
+
+No new operation, so steps 1 to 5 above do not apply. Run `npm run build && node scripts/measure-tools-list-size.mjs && npm run docs:gen`: the published `tools/list` bytes change with the text, and `tests/unit/tools_list_sizes_sync.test.js` fails on a stale `scripts/docs/tools-list-sizes.json` or README size table. If the tool is in the hand-kept list of `tests/unit/compact_description_layout.test.js`, keep that guard green; whether a tool joins that list is a decision, not a default (#714).
+
+### (b) A new compact tool
+
+Forbidden unless another compact tool is merged or retired in the same change (decision 3, the 15-tool ceiling; a 16th tool would cost the Glama Tool Count score). When it is allowed, also touch `src/compact/registry.ts`, add a title in `src/lib/tool-titles.ts`, and update section 8 of the design record.
 
 ---
 

@@ -10,17 +10,19 @@
 #       - actual-mcp-server-backend  port 3600  OIDC/Casdoor  (LibreChat, LobeChat)
 #       - actual-mcp-bearer-backend  port 3601  Bearer token  (automated tests)
 #     Both defined in: actual-mcp-server/docker-compose-local-build.yaml
-#   • LibreChat       (LibreChat/docker-compose.yml)
-#   • LobeChat        (lobechatAI/docker-compose.yml)
+#   • LibreChat and LobeChat (LibreChat/docker-compose.yml, lobechatAI/docker-compose.yml):
+#     ONLY with --with-chat-clients. Without the flag this script neither pulls,
+#     starts nor recreates them: a gate run on 2026-11-24 brought both stacks back
+#     up after they had been stopped on purpose.
 #
 # This script does NOT perform first-time installation. It simply keeps
 # everything up to date and verifies the MCP server is working correctly:
 #
 #   1. Sync latest dev code → docker build folder & rebuild MCP image
-#   2. Pull latest upstream images (actual-budget, librechat, lobechat)
+#   2. Pull latest upstream images (actual-budget; librechat and lobechat only with --with-chat-clients)
 #   3. Recreate BOTH MCP containers (OIDC:3600 + Bearer:3601)
-#   4. Independently restart LibreChat        (picks up new image if any)
-#   5. Independently restart LobeChat         (picks up new image if any)
+#   4. (--with-chat-clients only) Restart LibreChat   (picks up new image if any)
+#   5. (--with-chat-clients only) Restart LobeChat    (picks up new image if any)
 #   6. Wait for actual-mcp-bearer-backend (port 3601) to become healthy
 #   7. Run the integration suite over HTTP against the bearer instance (port 3601)
 #   8. Run the SAME integration suite over stdio (#280: real parity, not a smoke)
@@ -36,10 +38,12 @@
 #     $DOCKER_DIR/lobechatAI/                        ← LobeChat config files
 #
 # Usage:
-#   bash scripts/deploy-and-test.sh [TEST_LEVEL] [--bank-sync]
+#   bash scripts/deploy-and-test.sh [TEST_LEVEL] [--bank-sync] [--with-chat-clients]
 #   TEST_LEVEL: sanity | smoke | normal | extended | full (default: full)
 #   --bank-sync: opt-in flag to include per-account bank sync tests (GoCardless/SimpleFIN)
 #                Skipped by default. Also honoured via MCP_TEST_BANK_SYNC=true env var.
+#   --with-chat-clients: also pull and recreate LibreChat and LobeChat (steps 4 and 5).
+#                Off by default. Also honoured via DEPLOY_CHAT_CLIENTS=true env var.
 
 set -euo pipefail
 
@@ -66,9 +70,11 @@ STDIO_CONTAINER="actual-mcp-bearer-backend"   # container the stdio smoke execs 
 # Parse positional + flag args
 TEST_LEVEL="full"
 BANK_SYNC_FLAG=""   # empty = disabled
+CHAT_CLIENTS_FLAG=""   # empty = LibreChat and LobeChat are left exactly as they are
 for arg in "$@"; do
   case "$arg" in
     --bank-sync) BANK_SYNC_FLAG="true" ;;
+    --with-chat-clients) CHAT_CLIENTS_FLAG="true" ;;
     *)           TEST_LEVEL="$arg"    ;;
   esac
 done
@@ -76,9 +82,11 @@ done
 if [ "${MCP_TEST_BANK_SYNC:-}" = "true" ]; then
   BANK_SYNC_FLAG="true"
 fi
+if [ "${DEPLOY_CHAT_CLIENTS:-}" = "true" ]; then
+  CHAT_CLIENTS_FLAG="true"
+fi
 HEALTH_RETRIES=30          # × 3s = 90s max wait
-# Count registered tools directly from source, stays correct automatically
-EXPECTED_TOOL_COUNT=$(grep -c "^\s*'actual_" "$DEV_DIR/src/actualToolsManager.ts")
+# EXPECTED_TOOL_COUNT is computed after Step 6 (#681): it depends on the surface the container publishes.
 
 # ── Colours ────────────────────────────────────────────────────────────────
 GREEN='\033[0;32m'; YELLOW='\033[1;33m'; RED='\033[0;31m'; NC='\033[0m'
@@ -140,9 +148,11 @@ pull_image() {
 }
 
 pull_image "actualbudget/actual-server:latest"                      "Actual Budget"
-pull_image "ghcr.io/danny-avila/librechat:latest"                   "LibreChat"
-pull_image "ghcr.io/danny-avila/librechat-rag-api-dev-lite:latest"  "LibreChat RAG API"
-pull_image "lobehub/lobe-chat-database:latest"                      "LobeChat"
+if [ "$CHAT_CLIENTS_FLAG" = "true" ]; then
+  pull_image "ghcr.io/danny-avila/librechat:latest"                   "LibreChat"
+  pull_image "ghcr.io/danny-avila/librechat-rag-api-dev-lite:latest"  "LibreChat RAG API"
+  pull_image "lobehub/lobe-chat-database:latest"                      "LobeChat"
+fi
 
 # #618: a pull alone never reached the running Actual server, so it stayed on 26.7.0
 # while the image tag moved to 26.11.0 and every gate tested against the old server.
@@ -168,18 +178,26 @@ ok "actual-mcp-server-backend (OIDC, port 3600) recreated"
 ok "actual-mcp-bearer-backend (Bearer, port 3601) recreated"
 
 # ── 4. Restart LibreChat ────────────────────────────────────────────────────
-info "Step 4/9: Restarting LibreChat (ai-librechat, ai-librechat-rag-api)..."
-docker compose \
-  -f "$DOCKER_DIR/LibreChat/docker-compose.yml" \
-  up -d --force-recreate ai-librechat ai-librechat-rag-api
-ok "LibreChat restarted (mongo/pgvector/meilisearch untouched)"
+if [ "$CHAT_CLIENTS_FLAG" = "true" ]; then
+  info "Step 4/9: Restarting LibreChat (ai-librechat, ai-librechat-rag-api)..."
+  docker compose \
+    -f "$DOCKER_DIR/LibreChat/docker-compose.yml" \
+    up -d --force-recreate ai-librechat ai-librechat-rag-api
+  ok "LibreChat restarted (mongo/pgvector/meilisearch untouched)"
+else
+  info "Step 4/9: LibreChat left untouched (pass --with-chat-clients to restart it)"
+fi
 
 # ── 5. Restart LobeChat ────────────────────────────────────────────────────
-info "Step 5/9: Restarting LobeChat (lobe)..."
-docker compose \
-  -f "$DOCKER_DIR/lobechatAI/docker-compose.yml" \
-  up -d --force-recreate lobe
-ok "LobeChat restarted (postgres/minio/casdoor untouched)"
+if [ "$CHAT_CLIENTS_FLAG" = "true" ]; then
+  info "Step 5/9: Restarting LobeChat (lobe)..."
+  docker compose \
+    -f "$DOCKER_DIR/lobechatAI/docker-compose.yml" \
+    up -d --force-recreate lobe
+  ok "LobeChat restarted (postgres/minio/casdoor untouched)"
+else
+  info "Step 5/9: LobeChat left untouched (pass --with-chat-clients to restart it)"
+fi
 
 # ── 6. Wait for bearer MCP server health ─────────────────────────────────
 info "Step 6/9: Waiting for actual-mcp-bearer-backend (port 3601) to become healthy..."
@@ -197,6 +215,45 @@ for i in $(seq 1 "$HEALTH_RETRIES"); do
   echo "  ($i/${HEALTH_RETRIES}) status=${STATUS:-unknown}, waiting 3s..."
   sleep 3
 done
+
+# ── 6b. Work out the expected tool count for the surface the container publishes (#681) ──
+# The count depends on MCP_TOOL_SURFACE (legacy 85, compact 15, all 100), so it is computed
+# only now, from the RUNNING container's own configuration, not from the source alone. The
+# container's surface comes from the local-env config (outside this repository); unset means the default, compact. The suite assumes the
+# full set is published, so a narrowed set is refused rather than counted wrongly.
+container_env() { docker exec actual-mcp-bearer-backend printenv "$1" 2>/dev/null | tr 'A-Z' 'a-z' || true; }
+TOOL_SURFACE="$(container_env MCP_TOOL_SURFACE)"
+# Unset (or empty) is the DEFAULT surface, compact since #680, which is what the suite should
+# prove for the default deployment; the local-env config may also pin legacy, compact or all.
+if [ -z "$TOOL_SURFACE" ]; then
+  TOOL_SURFACE="compact"
+  info "MCP_TOOL_SURFACE is unset on actual-mcp-bearer-backend: the server default (compact) applies"
+fi
+CONT_TOOLSETS="$(container_env MCP_TOOLSETS)"
+if [ -n "$CONT_TOOLSETS" ] && [ "$CONT_TOOLSETS" != "all" ]; then
+  err "MCP_TOOLSETS is '$CONT_TOOLSETS' on actual-mcp-bearer-backend: the suite needs it empty or 'all'"
+  exit 1
+fi
+if [ -n "$(container_env MCP_TOOLS)" ]; then
+  err "MCP_TOOLS is set on actual-mcp-bearer-backend: the suite needs the full tool set, so unset MCP_TOOLS"
+  exit 1
+fi
+if [ "$(container_env MCP_READ_ONLY)" = "true" ]; then
+  err "MCP_READ_ONLY is true on actual-mcp-bearer-backend: the suite writes, so it must be unset or false"
+  exit 1
+fi
+LEGACY_TOOL_COUNT=$(grep -c "^\s*'actual_" "$DEV_DIR/src/actualToolsManager.ts" || true)
+COMPACT_TOOL_COUNT=$(grep -m1 '^export const COMPACT_TOOLS' "$DEV_DIR/src/compact/registry.ts" \
+  | sed -E 's/.*= *\[(.*)\].*/\1/' | awk -F',' '{ n = 0; for (i = 1; i <= NF; i++) if ($i ~ /[A-Za-z0-9_]/) n++; print n }')
+case "$LEGACY_TOOL_COUNT" in ''|0|*[!0-9]*) err "could not count legacy tools in src/actualToolsManager.ts (got '$LEGACY_TOOL_COUNT')"; exit 1 ;; esac
+case "$COMPACT_TOOL_COUNT" in ''|0|*[!0-9]*) err "could not count COMPACT_TOOLS in src/compact/registry.ts (got '$COMPACT_TOOL_COUNT')"; exit 1 ;; esac
+case "$TOOL_SURFACE" in
+  legacy)  EXPECTED_TOOL_COUNT="$LEGACY_TOOL_COUNT" ;;
+  compact) EXPECTED_TOOL_COUNT="$COMPACT_TOOL_COUNT" ;;
+  all)     EXPECTED_TOOL_COUNT=$((LEGACY_TOOL_COUNT + COMPACT_TOOL_COUNT)) ;;
+  *)       err "MCP_TOOL_SURFACE='$TOOL_SURFACE' on actual-mcp-bearer-backend is not legacy, compact or all"; exit 1 ;;
+esac
+ok "Tool surface: surface=${TOOL_SURFACE}, tools=${EXPECTED_TOOL_COUNT}"
 
 # ── 7. Run the integration suite over HTTP (bearer instance, port 3601) ────
 # #280: this is HALF the gate. Step 8 runs the SAME suite over stdio. A promotion to
@@ -244,7 +301,7 @@ else
   echo "  Residue sweep DISABLED: no budget designated disposable (MCP_TEST_BUDGET_SYNC_ID unset)."
 fi
 
-info "Step 7/9: HTTP integration tests against bearer instance port 3601 (level=${TEST_LEVEL}${BANK_SYNC_LABEL}, tools=${EXPECTED_TOOL_COUNT})..."
+info "Step 7/9: HTTP integration tests against bearer instance port 3601 (level=${TEST_LEVEL}${BANK_SYNC_LABEL}, surface=${TOOL_SURFACE}, tools=${EXPECTED_TOOL_COUNT})..."
 echo ""
 set +e
 EXPECTED_TOOL_COUNT="$EXPECTED_TOOL_COUNT" \
@@ -270,7 +327,7 @@ echo ""
 # READ-ONLY calls). It now runs the identical level-gated module suite through
 # `docker exec ... --stdio`, so both transports have equal write-path coverage.
 # The old smoke is still used at sanity/smoke levels, where the full suite does not run.
-info "Step 8/9: stdio integration tests against ${STDIO_CONTAINER} (level=${TEST_LEVEL}, tools=${EXPECTED_TOOL_COUNT})..."
+info "Step 8/9: stdio integration tests against ${STDIO_CONTAINER} (level=${TEST_LEVEL}, surface=${TOOL_SURFACE}, tools=${EXPECTED_TOOL_COUNT})..."
 echo ""
 STDIO_EXIT=0
 case "$TEST_LEVEL" in
@@ -285,9 +342,13 @@ case "$TEST_LEVEL" in
     info "  Refreshing the test budget's server snapshot (#595)..."
     # Every sync id the OIDC instance serves: the refresh refuses to write to any of them.
     # An unreadable OIDC container fails the run: an empty list would silently disable exit 3.
-    # Filtered inside the container, so its other secrets never reach this shell.
-    if ! OIDC_ENV=$(docker exec actual-mcp-server-backend sh -c \
-        "printenv | grep -E '^(ACTUAL_BUDGET_SYNC_ID|BUDGET_[0-9]+_SYNC_ID)=' || true"); then
+    # Read from the container's CONFIG (docker inspect), not from a shell inside it: the
+    # OIDC instance cannot start while its identity provider is down (it restart-loops,
+    # and `docker exec` then fails), yet its configured budgets are what must be protected.
+    # The grep is in the same pipeline, so its other secrets are never stored in this shell;
+    # pipefail makes a missing container fail the run.
+    if ! OIDC_ENV=$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' actual-mcp-server-backend \
+        | { grep -E '^(ACTUAL_BUDGET_SYNC_ID|BUDGET_[0-9]+_SYNC_ID)=' || true; }); then
       err "cannot read actual-mcp-server-backend's environment; test budget refresh not run"
       exit 1
     fi

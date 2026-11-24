@@ -38,7 +38,7 @@ process.env.ACTUAL_SERVER_URL ??= 'http://localhost:5006';
 process.env.ACTUAL_PASSWORD ??= 'dummy';
 process.env.ACTUAL_BUDGET_SYNC_ID ??= '00000000-0000-0000-0000-000000000000';
 // The suite must exercise the DEFAULT config for the "unset" cases, whatever the caller exported.
-for (const k of ['MCP_TOOLSETS', 'MCP_TOOLS', 'MCP_READ_ONLY']) delete process.env[k];
+for (const k of ['MCP_TOOLSETS', 'MCP_TOOLS', 'MCP_READ_ONLY', 'MCP_TOOL_SURFACE']) delete process.env[k];
 
 const read = (p) => readFileSync(join(ROOT, p), 'utf8');
 
@@ -487,10 +487,6 @@ function modelFacingText(name) {
  * the real signal that the preset is wrong.
  */
 const CHAT_REFERENCE_ALLOWLIST = {
-  actual_budgets_getMonths: {
-    substitute: 'actual_budgets_getMonth',
-    reason: 'the out-of-range refusal from setAmount and the budget batch states the first and last month',
-  },
   actual_rules_get: {
     substitute: 'actual_query_run',
     reason: 'query_run reads the rules table (actual-schema.ts)',
@@ -643,7 +639,7 @@ await check('server_info reports the published total, the registered total and t
   assert.strictEqual(info.tools.total, manager.getPublishedToolNames().length);
   assert.strictEqual(info.tools.total, new Set([...PRESETS.chat, 'actual_server_info']).size);
   assert.strictEqual(info.tools.registered, registered.length);
-  assert.deepStrictEqual(info.tools.policy, { toolsets: ['chat'], tools: ['actual_server_info'], readOnly: false });
+  assert.deepStrictEqual(info.tools.policy, { toolsets: ['chat'], tools: ['actual_server_info'], readOnly: false, surface: 'legacy' });
 });
 
 // ---------------------------------------------------------------- source assertions
@@ -665,9 +661,18 @@ const DISPATCHER = 'src/actualToolsManager.ts';
 const GETTOOL_READERS = new Set([
   DISPATCHER, 'src/index.ts', 'src/lib/ActualMCPConnection.ts', 'src/server/httpServer.ts', 'src/server/stdioServer.ts',
 ]);
+// #769: the one reviewed `.call(` outside the dispatcher. It registers the tools/call HANDLER on
+// the SDK server with an explicit receiver and never looks up or invokes a tool.
+// Only the exact reviewed expression is exempt, not the file: it is removed once from the text
+// before the scan, so any OTHER `.call(` added to the file is still reported.
+const CALL_EXEMPT = new Map([
+  ['src/lib/register-tool-call.ts', '(Protocol.prototype.setRequestHandler as unknown as (this: unknown, schema: unknown, h: unknown) => void).call('],
+]);
 function dispatchProblems(files) {
   const problems = [];
-  for (const [path, text] of Object.entries(files)) {
+  for (const [path, fullText] of Object.entries(files)) {
+    const reviewed = CALL_EXEMPT.get(path);
+    const text = reviewed ? fullText.replace(reviewed, '') : fullText;
     if (path !== DISPATCHER && (
       /(?:\?\.|\.)\s*(?:call|apply|bind)\s*\(/.test(text)
       || /\[\s*['"`](?:call|apply|bind)['"`]\s*\]\s*\(/.test(text)
@@ -692,6 +697,14 @@ await check('#533 U1 to U1d, P1: dispatchProblems catches every spelling and all
   assert.deepStrictEqual(D('src/tools/x.ts', 'const d = mgr.getTool(n);'), ['src/tools/x.ts: calls getTool( but is not a reviewed registry reader']);
   assert.deepStrictEqual(D('src/lib/x.ts', "await t['call'](a); Reflect.apply(t, null, [a]);"), [`src/lib/x.ts: invokes .call(, .apply( or .bind( (${NOT_MGR})`]);
   assert.deepStrictEqual(D('src/server/httpServer.ts', 'const d = actualToolsManager.getTool(name)?.description;'), []);
+});
+
+await check('#769 L2: the register-tool-call.ts exemption is the reviewed expression only, a stray .call( is reported', () => {
+  const real = stripTsComments(read('src/lib/register-tool-call.ts'));
+  assert.deepStrictEqual(dispatchProblems({ 'src/lib/register-tool-call.ts': real }), []);
+  const stray = dispatchProblems({ 'src/lib/register-tool-call.ts': real + '\nexport const x = (t) => t.call(1);' });
+  assert.strictEqual(stray.length, 1, JSON.stringify(stray));
+  assert.ok(/invokes \.call\(/.test(stray[0]), stray[0]);
 });
 
 await check('only actualToolsManager.ts dispatches a tool (the one place that refuses hidden tools)', () => {
@@ -721,7 +734,52 @@ await check('ToolUnavailableError is not a PreflightRefusal and carries only the
   assert.ok(!isPreflightRefusal(e));
   assert.strictEqual(e.name, 'ToolUnavailableError');
   assert.ok(!/extends PreflightRefusal/.test(code('src/lib/errors.ts').match(/class ToolUnavailableError[^{]*/)[0]));
-  assert.ok(/ToolUnavailableSetting = 'MCP_TOOLSETS' \| 'MCP_READ_ONLY'/.test(read('src/lib/errors.ts')));
+  assert.ok(/ToolUnavailableSetting = 'MCP_TOOLSETS' \| 'MCP_READ_ONLY' \| 'MCP_TOOL_SURFACE'/.test(read('src/lib/errors.ts')));
+});
+
+// ---------------------------------------------------------------- #652 deprecated aliases
+
+await check('#652: MCP_READ_ONLY refuses the old name of a writer exactly like the new name', async () => {
+  await manager.initialize({ toolsets: 'all', tools: '', readOnly: true });
+  for (const name of ['actual_budgets_setAmount', 'actual_budgets_set_amount']) {
+    await assert.rejects(
+      () => manager.callTool(name, { month: '2026-01', categoryId: 'c', amount: 1 }),
+      (e) => e instanceof ToolUnavailableError && e.setting === 'MCP_READ_ONLY' && e.message.includes('actual_budgets_set_amount'),
+      name,
+    );
+  }
+  await manager.initialize(ALL);
+});
+
+await check('#652: MCP_TOOLSETS=chat refuses the old name of a non-chat tool exactly like the new name', async () => {
+  assert.ok(!PRESETS.chat.includes('actual_budgets_set_carryover'), 'fixture: set_carryover must be outside the chat preset');
+  await manager.initialize({ toolsets: 'chat', tools: '', readOnly: false });
+  for (const name of ['actual_budgets_setCarryover', 'actual_budgets_set_carryover']) {
+    await assert.rejects(
+      () => manager.callTool(name, {}),
+      (e) => e instanceof ToolUnavailableError && e.setting === 'MCP_TOOLSETS' && e.message.includes('actual_budgets_set_carryover'),
+      name,
+    );
+  }
+  await manager.initialize(ALL);
+});
+
+await check('#652: MCP_TOOLS maps an old name to the new one and reports the mapping', () => {
+  const policy = resolve({ toolsets: 'query', tools: 'actual_budgets_getMonths' });
+  assert.ok(policy.published.includes('actual_budgets_get_months'));
+  assert.ok(!policy.published.includes('actual_budgets_getMonths'));
+  assert.deepStrictEqual([...policy.settings.tools], ['actual_budgets_get_months']);
+  assert.deepStrictEqual(policy.mappedAliases.map((m) => ({ ...m })), [{ alias: 'actual_budgets_getMonths', tool: 'actual_budgets_get_months' }]);
+  assert.deepStrictEqual([...resolve({}).mappedAliases], []);
+});
+
+await check('#652: MCP_TOOLS naming the old and the new name lists the tool once', () => {
+  const policy = resolve({ toolsets: 'query', tools: 'actual_budgets_getMonths,actual_budgets_get_months' });
+  assert.deepStrictEqual([...policy.settings.tools], ['actual_budgets_get_months']);
+});
+
+await check('#652 NEGATIVE: an MCP_TOOLS typo of an old name is still an unknown tool', () => {
+  throwsMatching(() => resolve({ tools: 'actual_budgets_getMonthz' }), /Unknown tool in MCP_TOOLS[\s\S]*actual_budgets_getMonthz/, 'typo of an alias');
 });
 
 console.log(`\n[toolsets] Results: ${passed} passed, ${failed} failed`);

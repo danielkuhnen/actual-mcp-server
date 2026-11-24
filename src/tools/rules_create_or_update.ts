@@ -15,8 +15,8 @@
  *
  * Adapted for this project's conventions:
  * - No wrapToolCall: uses the direct call() pattern
- * - Shares ConditionSchema with rules_create.ts (src/lib/schemas/rules.ts); ActionSchema and the
- *   FIELD_OPERATORS map are private copies of the same shape (#540 found them identical)
+ * - Shares ConditionSchema and (#711) the operator check assertConditionOperator with
+ *   rules_create.ts (src/lib/schemas/rules.ts); ActionSchema is the shared strict one (#761)
  *
  * #376: the read-match-write cycle lives in `adapter.upsertRule` (identity rules in
  * `src/lib/rule-matching.ts`). This tool owns the schema, the operator/UUID validation and
@@ -26,29 +26,7 @@
 import { z } from 'zod';
 import type { ToolDefinition } from '../../types/tool.d.js';
 import adapter from '../lib/actual-adapter.js';
-import { ACTION_DESCRIBE, CONDITION_OPERATORS_HELP, ConditionSchema, STAGE_DESCRIBE } from '../lib/schemas/rules.js';
-
-// #486: the condition schema is the shared one; the action schema stays private (same shape as
-// the shared one) and only borrows the describe text.
-const ActionSchema = z.object({
-  op: z.string().default('set').describe(`${ACTION_DESCRIBE.op}. Default "set"`),
-  field: z.string().optional().describe(ACTION_DESCRIBE.field),
-  value: z.union([z.string(), z.number(), z.boolean(), z.object({}).passthrough()]).describe(ACTION_DESCRIBE.value),
-  type: z.string().optional().describe(ACTION_DESCRIBE.type),
-  options: z.object({}).passthrough().optional().describe(ACTION_DESCRIBE.options),
-});
-
-// Same operator validation map as rules_create.ts
-const FIELD_OPERATORS: Record<string, { type: string; operators: string[] }> = {
-  'imported_payee': { type: 'string', operators: ['contains', 'matches', 'doesNotContain', 'is', 'isNot'] },
-  'payee': { type: 'id', operators: ['is', 'isNot', 'oneOf', 'notOneOf'] },
-  'account': { type: 'id', operators: ['is', 'isNot', 'oneOf', 'notOneOf'] },
-  'category': { type: 'id', operators: ['is', 'isNot', 'oneOf', 'notOneOf'] },
-  'notes': { type: 'string', operators: ['contains', 'matches', 'doesNotContain', 'is', 'isNot'] },
-  'description': { type: 'string', operators: ['contains', 'matches', 'doesNotContain', 'is', 'isNot'] },
-  'amount': { type: 'number', operators: ['is', 'gte', 'lte', 'gt', 'lt', 'isapprox'] },
-  'date': { type: 'date', operators: ['is', 'gte', 'lte', 'gt', 'lt'] },
-};
+import { ActionSchema, CONDITION_OPERATORS_HELP, ConditionSchema, STAGE_DESCRIBE, assertConditionOperator, assertConditionOptions, assertConditionValue, assertRuleLists, assertSetActionValue, assertTagOperatorValue, isTextOnIdField } from '../lib/schemas/rules.js';
 
 const InputSchema = z.object({
   // #342: see the long note in rules_create.ts. null is Actual's DEFAULT stage;
@@ -68,43 +46,40 @@ const InputSchema = z.object({
 
 const tool: ToolDefinition = {
   name: 'actual_rules_create_or_update',
-  description: `Create a rule, or update the existing rule with the same conditions. Prevents duplicates.
+  description: `Create a rule, or update the existing rule with the same conditions.
 
-A rule matches when it has the same conditions (field, op, value) and conditionsOp, in any order. On a match the rule's actions are REPLACED, and its stage is replaced ONLY if you supply one (omit stage to leave it). A newly created rule with no stage gets the normal stage (null).
+A rule matches when it has the same conditions (field, op, value) and conditionsOp, in any order. On a match the rule's actions are REPLACED, and its stage is replaced ONLY if you supply one (omit stage to leave it). A new rule with no stage gets the normal stage (null).
 
 ${CONDITION_OPERATORS_HELP}
 
-Returns: { id, created: boolean }, created=true for a new rule, false for an updated one.`,
+Returns: { id, created }, created true for a new rule, false for an updated one.`,
   inputSchema: InputSchema,
   call: async (args: unknown, _meta?: unknown) => {
     // Zod validation errors are formatted centrally by actualToolsManager (#206).
     const input = InputSchema.parse(args || {});
 
+    // #762: both lists must hold at least one item.
+    assertRuleLists(input);
+
     // ── Validate conditions ──
     for (const condition of input.conditions) {
-      const fieldInfo = Object.hasOwn(FIELD_OPERATORS, condition.field) ? FIELD_OPERATORS[condition.field] : undefined;
-      if (fieldInfo && !fieldInfo.operators.includes(condition.op)) {
-        throw new Error(
-          `Invalid operator "${condition.op}" for field "${condition.field}". ` +
-          `Field "${condition.field}" is a ${fieldInfo.type} field and only supports: ${fieldInfo.operators.join(', ')}.`,
-        );
-      }
-      if (condition.field === 'payee' && typeof condition.value === 'string' && !condition.value.match(/^[0-9a-f-]{36}$/i)) {
+      assertConditionOperator(condition);
+      assertTagOperatorValue(condition);
+      assertConditionValue(condition);
+      assertConditionOptions(condition);
+      if (!isTextOnIdField(condition)) continue;
+      if (condition.field === 'payee') {
         throw new Error(
           `Field "payee" expects a UUID, but got "${condition.value}". ` +
           `Use "imported_payee" for text matching instead.`,
         );
       }
-      if (['account', 'category'].includes(condition.field) && typeof condition.value === 'string' && !condition.value.match(/^[0-9a-f-]{36}$/i)) {
-        throw new Error(`Field "${condition.field}" expects a UUID, but got text "${condition.value}".`);
-      }
-      if (['oneOf', 'notOneOf'].includes(condition.op) && !Array.isArray(condition.value)) {
-        throw new Error(`Operator "${condition.op}" expects an array of values.`);
-      }
+      throw new Error(`Field "${condition.field}" expects a UUID, but got text "${condition.value}".`);
     }
 
     // ── Validate actions ──
     for (const action of input.actions) {
+      assertSetActionValue(action);
       if (action.op === 'set' && !action.field) {
         throw new Error('Action with op="set" requires a "field" property.');
       }

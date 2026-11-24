@@ -415,16 +415,68 @@ jobs:
           echo "- **Version**: \`${{ needs.version.outputs.version }}\`" >> $GITHUB_STEP_SUMMARY
 
   # --------------------------------------------------------------------------
+  # Job 3.2: Changed-line coverage (#720). A REPORT, never a gate.
+  # It rebuilds with inline source maps, re-runs the unit and adapter suites
+  # under NODE_V8_COVERAGE and writes which CHANGED src/ lines they executed to
+  # the job summary. It is its own job because that second run takes as long as
+  # the gating one (about 5 to 10 minutes): inside Run Tests it would delay the
+  # gate and could push it over its timeout, which no step-level
+  # continue-on-error survives. Nothing lists this job in `needs`, and
+  # continue-on-error keeps a failure or a timeout here from marking the run red.
+  # Pull requests only: the trial (docs/development/testing-and-reliability.md,
+  # "Measuring Coverage") is counted in pull requests. The base sha reaches the
+  # shell through env, never by interpolation.
+  # --------------------------------------------------------------------------
+  changed-line-coverage:
+    name: Changed-line coverage (warn-only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    continue-on-error: true
+    if: ${{ github.event_name == 'pull_request' }}
+    permissions:
+      contents: read
+    steps:
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v7
+
+      - name: 🔧 Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: 📦 Install dependencies
+        run: npm ci
+
+      - name: 📊 Report changed-line coverage
+        env:
+          ACTUAL_SERVER_URL: http://localhost:5006
+          ACTUAL_PASSWORD: dummy-password-for-tests
+          ACTUAL_BUDGET_SYNC_ID: 00000000-0000-0000-0000-000000000000
+          COVERAGE_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [ -z "$COVERAGE_BASE_SHA" ]; then
+            echo "skip: changed-line coverage: this event has no base commit" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if ! git fetch --no-tags --depth 1 origin "$COVERAGE_BASE_SHA"; then
+            echo "skip: changed-line coverage: the base commit could not be fetched" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          node scripts/changed-line-coverage.mjs --collect --base "$COVERAGE_BASE_SHA" --summary "$GITHUB_STEP_SUMMARY"
+
+  # --------------------------------------------------------------------------
   # Job 3.5: Docker E2E Tests (Runs in Parallel with Lint & Test)
   # --------------------------------------------------------------------------
   docker-e2e:
     name: Docker E2E Tests
     runs-on: ubuntu-latest
-    # #593: 25, not 20, so the run step's own 18 minute timeout (below) always fires first. Measured
-    # on the runs before this change: the steps before it take about 1 minute warm, the log dump
-    # and teardown under 15 seconds, the image cache save under 30 seconds, so a run that stalls
-    # to the step limit still ends with over 5 minutes of job time to spare.
-    timeout-minutes: 25
+    # #593: the job cap sits above the run step's own timeout (below) so that step always fires
+    # first. Measured on the runs before #593: the steps before it take about 1 minute warm, the
+    # log dump and teardown under 15 seconds, the image cache save under 30 seconds, so a run that
+    # stalls to the step limit still ends with over 5 minutes of job time to spare. 37 since the
+    # step went to 30 (#678), 52 since it went to 45 (2026-11-23).
+    timeout-minutes: 52
     needs: version
     if: ${{ github.event.inputs.skip_tests != 'true' }}
     # #600: this job only checks out, uses the Actions cache and builds images locally. It pushes
@@ -449,7 +501,7 @@ jobs:
         run: npm ci
 
       # Playwright browsers are NOT installed on the host: tests run inside the
-      # mcr.microsoft.com/playwright:v1.64.1-jammy Docker container (e2e-test-runner
+      # mcr.microsoft.com/playwright:v1.65.1-jammy Docker container (e2e-test-runner
       # service in tests/e2e/compose.yaml) which already has Playwright pre-installed.
 
       - name: 🗄️ Restore Docker image cache
@@ -476,9 +528,18 @@ jobs:
       # this step timed out in a test run (40330966576, timeout 1), nothing from the script's
       # EXIT trap reached the job log and the containers were still up at the cleanup step, so
       # that step dumps the service logs too.
+      # #678: 30, not 18. The compact surface rows grew the suite to 257 tests per leg,
+      # and the stdio leg is paced at 90 calls a minute: run 43378416460 passed HTTP in 5.2
+      # minutes and was cut off in the last stdio rows at 18; the same sha took 12.3 minutes for
+      # stdio alone locally. A healthy run is now about 19 minutes.
+      # 2026-11-23: 45, not 30. The compact surface verification rows grew the suite again (368
+      # tests into the stdio leg and still running at the cut): on the same afternoon the whole
+      # job took 29.6 minutes (run on t/781, passed), 30.3 (t/757, passed) and was cut off at 30
+      # in the last legacy smoke rows (t/750, which adds rows of its own). Every call is paced
+      # at 90 a minute, so the time follows the number of calls, not the runner.
       - name: 🧪 Run Docker E2E tests (FULL - 63 tests)
         id: e2e
-        timeout-minutes: 18
+        timeout-minutes: 45
         run: npm run test:e2e:docker:full
 
       # #593: this runs BEFORE the image cache save so the dump is the first thing after a stalled
@@ -504,7 +565,7 @@ jobs:
           mkdir -p /tmp/docker-image-cache
           docker save actualbudget/actual-server:latest \
             -o /tmp/docker-image-cache/actual-server.tar 2>/dev/null || true
-          docker save "mcr.microsoft.com/playwright:v1.64.1-jammy" \
+          docker save "mcr.microsoft.com/playwright:v1.65.1-jammy" \
             -o /tmp/docker-image-cache/playwright-jammy.tar 2>/dev/null || true
 
       # #600: start the published image the way the README documents it. The step builds the
@@ -957,7 +1018,7 @@ jobs:
           persist-credentials: false
 
       - name: 🔏 Install cosign
-        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
 
       - name: 📦 Install mcp-publisher (pinned, signature and hash verified)
         run: |
@@ -1012,7 +1073,7 @@ jobs:
           persist-credentials: false
 
       - name: 🔏 Install cosign
-        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
 
       - name: 📦 Install mcp-publisher (pinned, signature and hash verified)
         run: |
@@ -1310,8 +1371,13 @@ jobs:
           # Canonical tool count via scripts/tool-count.mjs (#193): never a
           # literal, which is how the old "62 MCP tools" body drifted (#261 fix 4).
           TOOL_COUNT=$(node -e "import('./scripts/tool-count.mjs').then(m => console.log(m.getCanonicalCount()))")
+          # #680: the default surface publishes the compact tools, so the headline is
+          # "N tools over M operations". N is the length of the COMPACT_TOOLS array literal.
+          COMPACT_COUNT=$(grep -m1 '^export const COMPACT_TOOLS' src/compact/registry.ts \
+            | sed -E 's/.*= *\[(.*)\].*/\1/' | awk -F',' '{ n = 0; for (i = 1; i <= NF; i++) if ($i ~ /[A-Za-z0-9_]/) n++; print n }')
           API_VERSION=$(node -p "require('./package.json').dependencies['@actual-app/api'].replace(/^[^0-9]*/, '')")
           echo "tool_count=$TOOL_COUNT" >> $GITHUB_OUTPUT
+          echo "compact_count=$COMPACT_COUNT" >> $GITHUB_OUTPUT
           echo "api_version=$API_VERSION" >> $GITHUB_OUTPUT
           echo "Release facts: ${TOOL_COUNT} tools, @actual-app/api ${API_VERSION}"
 
@@ -1360,7 +1426,7 @@ jobs:
             ### 📊 What this release ships
 
             - `@actual-app/api` pinned at `${{ steps.facts.outputs.api_version }}`
-            - All ${{ steps.facts.outputs.tool_count }} MCP tools registered and validated on this tag
+            - ${{ steps.facts.outputs.compact_count }} tools over ${{ steps.facts.outputs.tool_count }} operations registered and validated on this tag
 
             ### 🔒 Security
 

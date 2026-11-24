@@ -29,7 +29,26 @@ const OPEN_ID   = 'aaaaaaaa-1111-2222-3333-444444444444';
 const CLOSED_ID = 'bbbbbbbb-1111-2222-3333-444444444444';
 
 (async () => {
-  const adapter = (await import('../../dist/src/lib/actual-adapter.js')).default;
+  // #768: raw api stubs go in BEFORE the adapter import (it destructures them at module load) so
+  // the REAL adapter.deleteAccount can be exercised below, before the tool tests replace it.
+  const apiMod = await import('@actual-app/api');
+  const apiDefault = (apiMod.default || apiMod);
+  let transferRows = [];
+  let rawDeletes = [];
+  let lastQuery = null;
+  apiDefault.runQuery = async (query) => { lastQuery = query.serialize(); return { data: transferRows }; };
+  // #771: the raw delete can throw upstream's text, and the fresh read that follows is stubbed too.
+  let rawDeleteError = null;
+  let rawAccounts = [{ id: OPEN_ID }];
+  let rawAccountsThrow = false;
+  let rawAccountReads = 0;
+  apiDefault.deleteAccount = async (id) => { rawDeletes.push(id); if (rawDeleteError) throw rawDeleteError; };
+  apiDefault.getAccounts = async () => { rawAccountReads++; if (rawAccountsThrow) throw new Error('read failed'); return rawAccounts; };
+  apiDefault.sync = async () => {};
+  const adapterMod = await import('../../dist/src/lib/actual-adapter.js');
+  adapterMod._setSkipApiInitForTests(true);
+  const adapter = adapterMod.default;
+  const realDeleteAccount = adapter.deleteAccount;
   const tool = (await import('../../dist/src/tools/accounts_delete.js')).default;
 
   // Shaped after the real listing that exposed the bug: closed test accounts
@@ -49,17 +68,50 @@ const CLOSED_ID = 'bbbbbbbb-1111-2222-3333-444444444444';
     deleted.push(id);
     const target = accounts.find((a) => a.id === id);
     if (target && target.closed !== true) accounts = accounts.filter((a) => a.id !== id);
-    return { success: true };
+    return { detachedTransfers };
   };
-  const reset = () => { deleted = []; accounts = [...ACCOUNTS]; };
+  let detachedTransfers = 0;
+  const reset = () => { deleted = []; accounts = [...ACCOUNTS]; detachedTransfers = 0; };
 
   console.log('\n[accounts-delete] an OPEN account is deleted, unchanged behaviour');
   {
     reset();
     const res = await tool.call({ id: OPEN_ID });
     check(res?.success === true, 'reports success');
+    check(res?.detachedTransfers === 0, 'reports detachedTransfers: 0 when there are no transfers (#768)');
     check(deleted.length === 1 && deleted[0] === OPEN_ID, 'and the adapter was actually asked to delete it');
     check(!accounts.some((a) => a.id === OPEN_ID), 'and the account is genuinely gone');
+  }
+
+  console.log('\n[#768] the tool carries the adapter count into its result');
+  {
+    reset();
+    detachedTransfers = 2;
+    const res = await tool.call({ id: OPEN_ID });
+    check(res?.success === true && res?.detachedTransfers === 2, 'detachedTransfers: 2 reaches the tool result');
+  }
+
+  console.log('\n[#768] the real adapter counts the account\'s transfer rows before the delete');
+  {
+    for (const n of [0, 1, 2]) {
+      transferRows = Array.from({ length: n }, (_, i) => ({ id: `t${i}` }));
+      rawDeletes = [];
+      const out = await realDeleteAccount(OPEN_ID);
+      check(out?.detachedTransfers === n, `${n} transfer row(s) give detachedTransfers ${n}`, JSON.stringify(out));
+      check(rawDeletes.length === 1 && rawDeletes[0] === OPEN_ID, 'and the raw delete ran once');
+    }
+  }
+
+  console.log('\n[#768] the count query asks for this account\'s transfer rows, split children included');
+  {
+    transferRows = [{ id: 't0' }];
+    lastQuery = null;
+    await realDeleteAccount(OPEN_ID);
+    const sq = JSON.stringify(lastQuery?.filterExpressions ?? []);
+    check(lastQuery?.table === 'transactions', 'it queries the transactions table', JSON.stringify(lastQuery));
+    check(sq.includes('"account":"' + OPEN_ID + '"'), 'it filters on this account', sq);
+    check(/"transfer_id":\{"\$ne":null\}/.test(sq), 'it keeps only rows with a transfer_id (not null)', sq);
+    check(lastQuery?.tableOptions?.splits === 'all', 'it reads with splits all, so split children count', JSON.stringify(lastQuery?.tableOptions));
   }
 
   console.log('\n[accounts-delete] REGRESSION GUARD: a CLOSED account is NOT falsely confirmed');
@@ -94,11 +146,30 @@ const CLOSED_ID = 'bbbbbbbb-1111-2222-3333-444444444444';
     check(res?.success === true, 'deleting an id that is already absent reports success (idempotent)');
   }
 
-  console.log('\n[accounts-delete] an unknown id is idempotent, matching prior behaviour');
+  console.log('\n[#771] an unknown id is refused with a next step, not reported as a success');
   {
-    reset();
-    const res = await tool.call({ id: 'cccccccc-0000-0000-0000-000000000000' });
-    check(res?.success === true, 'an id that never existed reports success');
+    const { isPreflightRefusal, NotFoundRefusal } = await import('../../dist/src/lib/errors.js');
+    const UNKNOWN = 'cccccccc-0000-0000-0000-000000000000';
+    const upstream = new Error(`Account with ID ${UNKNOWN} not found.`);
+    const run = async () => { try { await realDeleteAccount(UNKNOWN); return null; } catch (e) { return e; } };
+
+    rawDeletes = []; rawDeleteError = upstream; rawAccounts = [{ id: OPEN_ID }]; rawAccountsThrow = false; rawAccountReads = 0;
+    let err = await run();
+    check(err instanceof NotFoundRefusal && isPreflightRefusal(err), 'upstream not-found plus an absent id is a NotFoundRefusal', String(err));
+    check(/actual_accounts_list/.test(err?.message ?? '') && !/Account with ID/.test(err?.message ?? ''), 'it names the list tool and not upstream text', err?.message);
+    check(rawDeletes.length === 1, 'the delete was attempted once (no retry)');
+
+    rawAccounts = [{ id: UNKNOWN }];
+    err = await run();
+    check(err === upstream, 'NEGATIVE: the id is still listed, so the original error is rethrown unchanged', String(err));
+
+    rawAccounts = [{ id: OPEN_ID }]; rawAccountsThrow = true;
+    err = await run();
+    check(err === upstream, 'NEGATIVE: the re-read fails, so the original error is rethrown unchanged', String(err));
+
+    rawDeleteError = null; rawAccountsThrow = false; rawAccountReads = 0;
+    await realDeleteAccount(UNKNOWN);
+    check(rawAccountReads === 0, 'a delete that succeeds (a tombstoned id) reads nothing and is not refused');
   }
 
   console.log('\n[accounts-delete] schema validation still runs before any adapter call');

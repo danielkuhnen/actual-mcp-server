@@ -26,7 +26,7 @@ openssl rand -hex 32
 MCP_SSE_AUTHORIZATION=<your-generated-token>
 ```
 
-Clients send `Authorization: Bearer <your-generated-token>`. Set the variable to the raw token only: a value that starts with `Bearer ` never matches, and every request gets HTTP 401 `Unauthorized: Invalid token` (`src/server/httpServer.ts`).
+Clients send `Authorization: Bearer <your-generated-token>`. Set the variable to the raw token only: a value that starts with `Bearer ` never matches, and every request gets HTTP 401 `Unauthorized: Invalid token` (`src/server/httpServer.ts`). Every static-token 401 carries a fixed `WWW-Authenticate` challenge (RFC 9110 15.5.2, RFC 6750): `Bearer realm="actual-mcp-server"` when no header was sent, plus `error="invalid_request"` for a header that is not `Bearer <token>` and `error="invalid_token"` for a token that matches no entry. It never contains the presented token.
 
 Every client is the same principal, `static-bearer`, so all clients share one budget preference and can reach every budget. Rotating the token means changing the value and restarting: configuration is read once at startup.
 
@@ -65,6 +65,13 @@ With the default, `static`, it comes from `AUTH_BUDGET_ACL`:
 With **`AUTH_BUDGET_ACL_SOURCE=actual`**, `AUTH_BUDGET_ACL` is not consulted at all, not even when it is unset or `{}`: each request gets exactly the budgets whose access list on the Actual server includes that user. A user with none, or a lookup that fails, gets HTTP 403. The identity settings for this mode are in [configuration.md](../reference/configuration.md) and under "Identity matching for the dynamic ACL" in [security-and-privacy.md](../explanation/security-and-privacy.md).
 
 ## OIDC multi-user setup
+
+For OIDC deployments using Actual's permissions, [budget discovery](multiple-budgets.md#discover-shared-budgets)
+can expose each user's shared files without configuring each Sync ID. A new session opens
+the user's last selected file if their current grants still permit it. With no usable preference
+or configured budget, one permitted, unencrypted file opens automatically. Users with several
+permitted files choose which one to open. A granted encrypted file with no configured key
+shows up as locked. A session with only locked files can list them without opening one.
 
 > **This is inbound auth only.** `AUTH_PROVIDER=oidc` controls how MCP **clients** authenticate
 > **to this server**. It does not change how this server authenticates **to Actual Budget**, which

@@ -136,7 +136,10 @@ function dependencyVersionLiterals(readme) {
 
 // ----- #603: hand-typed tool-surface counts are forbidden outside the generated block -----
 
-const BLOCK_RE = /<!-- BEGIN GENERATED: tools-summary -->[\s\S]*?<!-- END GENERATED: tools-summary -->/;
+// #668: strip only the blocks whose numbers are generated (tools-summary, capabilities-sizes).
+// The other capabilities blocks embed hand-written summary, examplePrompt and prompt description
+// text from src/, so they stay in the hand-typed-count scan.
+const BLOCK_RE = /<!-- BEGIN GENERATED: (tools-summary|capabilities-sizes) -->[\s\S]*?<!-- END GENERATED: \1 -->/g;
 const HAND_TYPED = [
   /\d+ write-capable/,
   /\(\d+ of the \d+/,
@@ -282,6 +285,20 @@ check('POSITIVE: the generated block is stripped before scanning', () => {
   const text = 'x\n<!-- BEGIN GENERATED: tools-summary -->\nhides 48 write-capable tools and leaves 36\n<!-- END GENERATED: tools-summary -->\ny';
   assert.deepStrictEqual(handTypedCounts('README.md', text), []);
   assert.strictEqual(handTypedCounts('README.md', text + ' the 48 write-capable').length, 1);
+});
+
+check('(#668) POSITIVE: a count inside a generated-number block is not reported; hand-written capabilities text is still scanned', () => {
+  const inside = 'x\n<!-- BEGIN GENERATED: capabilities-sizes -->\nthe surface publishes 6 tools\n<!-- END GENERATED: capabilities-sizes -->\ny';
+  assert.deepStrictEqual(handTypedCounts('README.md', inside), []);
+  assert.strictEqual(handTypedCounts('README.md', inside + '\nit publishes 6 tools').length, 1);
+  const spec = '<!-- BEGIN GENERATED: capabilities-tools -->\nthe surface publishes 6 tools\n<!-- END GENERATED: capabilities-tools -->';
+  assert.strictEqual(handTypedCounts('README.md', spec).length, 1);
+  assert.strictEqual(handTypedCounts('README.md', 'it publishes 6 tools').length, 1);
+});
+
+check('(#668) NEGATIVE: a mismatched END id does not hide a count', () => {
+  const text = '<!-- BEGIN GENERATED: capabilities-sizes -->\npublishes 6 tools\n<!-- END GENERATED: tools-summary -->';
+  assert.strictEqual(handTypedCounts('README.md', text).length, 1);
 });
 
 console.log(`\n[readme-stats-sync] Results: ${passed} passed, ${failed} failed`);

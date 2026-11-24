@@ -6,6 +6,8 @@
 process.env.ACTUAL_SERVER_URL     = process.env.ACTUAL_SERVER_URL     ?? 'http://localhost:5006';
 process.env.ACTUAL_BUDGET_SYNC_ID = process.env.ACTUAL_BUDGET_SYNC_ID ?? '00000000-0000-0000-0000-000000000000';
 process.env.ACTUAL_PASSWORD       = process.env.ACTUAL_PASSWORD       ?? 'dummy';
+// #680: these tests call the legacy actual_* tools through the manager, so they pin the legacy surface.
+process.env.MCP_TOOL_SURFACE = 'legacy';
 
 let failures = 0;
 const pass = (l) => console.log(`  ✓ ${l}`);
@@ -140,7 +142,7 @@ const ok = (cond, l, d = '') => cond ? pass(l) : fail(l, d);
       'accounts_update ZodError unified onto central prefix');
     // domain (non-Zod) message preserved
     eq(await call('actual_accounts_update', { id: '00000000-0000-0000-0000-000000000000', fields: {} }),
-      'No fields provided to update. Include at least one field: name, offbudget, or closed.',
+      'No fields provided to update. Include at least one field: name, offbudget, closed, or account_group_id.',
       'accounts_update domain message preserved');
     // unrecognized field in strict sub-object (matches the e2e /unexpected field/i assertion)
     eq(await call('actual_accounts_update', { id: '00000000-0000-0000-0000-000000000000', fields: { invalidField: 'x' } }),

@@ -1,21 +1,27 @@
 import { z } from 'zod';
 import type { ToolDefinition } from '../../types/tool.d.js';
 import adapter from '../lib/actual-adapter.js';
+import { CommonSchemas } from '../lib/schemas/common.js';
+import { expandSplitsForSearch } from '../lib/split-search.js';
+import { idSetByName } from '../lib/actual-adapter/filter-ids.js';
 
 const InputSchema = z.object({
-  payeeName: z.string().optional().describe('Name of the payee/vendor to search for (optional for smoke tests)'),
-  startDate: z.string().optional().describe('Optional: Start date in YYYY-MM-DD format'),
-  endDate: z.string().optional().describe('Optional: End date in YYYY-MM-DD format'),
-  accountId: z.string().optional().describe('Optional: Filter by specific account ID'),
-  categoryName: z.string().optional().describe('Optional: Filter by category name'),
-  minAmount: z.number().optional().describe('Optional: Minimum amount in cents'),
-  maxAmount: z.number().optional().describe('Optional: Maximum amount in cents'),
-  limit: z.number().optional().default(100).describe('Optional: Maximum number of transactions to return (default: 100)'),
+  payeeName: z.string().optional().describe('Name of the payee/vendor to search for'),
+  startDate: CommonSchemas.date.optional().describe('Start date in YYYY-MM-DD format'),
+  endDate: CommonSchemas.date.optional().describe('End date in YYYY-MM-DD format'),
+  accountId: z.string().optional().describe('Filter by specific account ID'),
+  categoryName: z.string().optional().describe('Filter by category name'),
+  minAmount: z.number().optional().describe('Minimum amount in cents'),
+  maxAmount: z.number().optional().describe('Maximum amount in cents'),
+  limit: z.number().optional().default(100).describe('Maximum number of transactions to return'),
 });
 
 const tool: ToolDefinition = {
   name: 'actual_transactions_search_by_payee',
-  description: 'Search transactions by payee name. Returns all transactions for a specific payee with optional date range, category, and amount filters. Useful for analyzing spending patterns with specific vendors or service providers.',
+  description:
+    'Search transactions by payee name (case-insensitive exact match, e.g. "Amazon"), optionally narrowed by a YYYY-MM-DD date range, accountId, categoryName and an amount range in integer cents. Read-only; off-budget accounts are included. ' +
+    'Returns up to limit rows (default 100), newest first, as { transactions, count, totalAmount, hasMore, payeeName }, each row with accountName; count and totalAmount cover only the returned rows, hasMore is true when more rows matched. With categoryName, a split is matched by its children; rows carry parent_id. ' +
+    'An unknown payee or category name returns an empty list with an error field. With a payee id use actual_transactions_filter; for per-payee totals use actual_transactions_aggregate.',
   inputSchema: InputSchema,
   call: async (args: unknown, _meta?: unknown) => {
     const input = InputSchema.parse(args || {});
@@ -29,23 +35,23 @@ const tool: ToolDefinition = {
     }
 
     // Step 1: Find payee ID by name
-    let payeeId: string | undefined;
+    let payeeIds: Set<string> | undefined;
     if (input.payeeName) {
       const payees = await adapter.getPayees();
-      const payee = payees.find((p: any) => 
-        p.name && p.name.toLowerCase() === input.payeeName!.toLowerCase()
-      );
-      if (!payee) {
+      // #802: every payee carrying the name (a regular and a transfer payee can share one).
+      const matched = idSetByName(payees, input.payeeName);
+      if (matched.size === 0) {
         // Payee not found - return empty result
         return {
           transactions: [],
           count: 0,
           totalAmount: 0,
+          hasMore: false,
           payeeName: input.payeeName,
           error: `Payee "${input.payeeName}" not found`,
         };
       }
-      payeeId = payee.id;
+      payeeIds = matched;
     }
     
     // Step 2: Get base transactions (filtered by account and date range if provided)
@@ -74,6 +80,7 @@ const tool: ToolDefinition = {
         transactions: [],
         count: 0,
         totalAmount: 0,
+        hasMore: false,
         payeeName: input.payeeName,
       };
     }
@@ -81,29 +88,36 @@ const tool: ToolDefinition = {
     // Step 3: Apply JavaScript filters
     let filtered = allTransactions;
     
-    // Filter by payee ID
-    if (payeeId) {
-      filtered = filtered.filter((t: any) => t.payee === payeeId);
-    }
-    
-    // Filter by category name (need to lookup category ID)
+    // #750: resolve the category BEFORE expanding, so an unknown name returns its existing error
+    // result and nothing is expanded. A split parent has a null category, so with a category
+    // filter the split is replaced by its children before any other filter runs.
+    let categoryIds: Set<string> | undefined;
     if (input.categoryName) {
       const categories = await adapter.getCategories();
-      const category = categories.find((c: any) =>
-        c.name && c.name.toLowerCase() === input.categoryName!.toLowerCase()
-      );
-      if (category) {
-        filtered = filtered.filter((t: any) => t.category === category.id);
-      } else {
+      const matchedCategories = idSetByName(categories, input.categoryName);
+      if (matchedCategories.size === 0) {
         // Category not found - return empty
         return {
           transactions: [],
           count: 0,
           totalAmount: 0,
+          hasMore: false,
           payeeName: input.payeeName,
           error: `Category "${input.categoryName}" not found`,
         };
       }
+      categoryIds = matchedCategories;
+      filtered = expandSplitsForSearch(filtered).rows;
+    }
+
+    // Filter by payee ID
+    if (payeeIds) {
+      filtered = filtered.filter((t: any) => payeeIds.has(t.payee));
+    }
+    
+    // Filter by category (resolved above)
+    if (categoryIds) {
+      filtered = filtered.filter((t: any) => categoryIds.has(t.category));
     }
     
     // Filter by amount range
@@ -121,7 +135,9 @@ const tool: ToolDefinition = {
       return dateB.localeCompare(dateA);
     });
     
+    // #755: computed against the slice, so it agrees with the rows returned even for a negative limit.
     const limited = filtered.slice(0, input.limit || 100);
+    const hasMore = filtered.length > limited.length;
     
     // Enrich transactions with account names
     const accounts = await adapter.getAccounts();
@@ -139,6 +155,7 @@ const tool: ToolDefinition = {
       transactions: enrichedTransactions,
       count: enrichedTransactions.length,
       totalAmount,
+      hasMore,
       payeeName: input.payeeName,
     };
   },

@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import type { ToolDefinition } from '../../types/tool.d.js';
 import adapter from '../lib/actual-adapter.js';
-import { CommonSchemas } from '../lib/schemas/common.js';
+import { CommonSchemas, oneOffDateSchema } from '../lib/schemas/common.js';
 import { RecurConfigSchema } from '../lib/schemas/recur.js';
 import { ScheduleAmountSchema, amountOpMismatch, ISBETWEEN_NEEDS_RANGE } from '../lib/schemas/schedule-amount.js';
 
@@ -17,8 +17,7 @@ const InputSchema = z.object({
   amountOp: z.enum(['is', 'isapprox', 'isbetween']).optional().default('is')
     .describe('How to match the amount'),
   date: z.union([
-    z.string().regex(/^\d{4}-\d{2}-\d{2}$/)
-      .describe('One-off schedule on this date'),
+    oneOffDateSchema.describe('One-off schedule on this date'),
     RecurConfigSchema
       .describe('Recurring schedule'),
   ]).describe('YYYY-MM-DD for one-off, RecurConfig object for recurring. Required.'),
@@ -34,7 +33,8 @@ const InputSchema = z.object({
 
 const tool: ToolDefinition = {
   name: 'actual_schedules_create',
-  description: `Create a schedule, one-off (YYYY-MM-DD date) or recurring (RecurConfig object: frequency and start, optional endMode, monthly patterns such as the last day or the second Monday). Amounts are in cents, negative for expenses.`,
+  description:
+    "Create a schedule: one-off (date YYYY-MM-DD) or recurring (date as a RecurConfig: frequency and start, optional endMode, monthly patterns). Amounts in cents, negative for expenses. An unknown account or payee id is refused. Preview its dates with actual_schedules_dates; change it with actual_schedules_update. Returns { id }.",
   inputSchema: InputSchema,
   call: async (args: unknown, _meta?: unknown) => {
     const input = InputSchema.parse(args || {});

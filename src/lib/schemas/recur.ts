@@ -1,4 +1,6 @@
 import { z } from 'zod';
+import { oneOffDateSchema } from './common.js';
+import { isCalendarDay } from '../dates.js';
 
 // Shared recurrence-config schema for Actual schedules. Used by both actual_schedules_create
 // and actual_schedules_update so the two tools agree on the same shape and publish a typed
@@ -9,14 +11,20 @@ import { z } from 'zod';
 // `day` maps to a day of the month, a weekday to the nth weekday; upstream honours them only
 // for frequency 'monthly'.
 const RecurPatternSchema = z.object({
-  type: z.enum(['day', 'SU', 'MO', 'TU', 'WE', 'TH', 'FR', 'SA']),
-  value: z.number().int(),
+  type: z.enum(['day', 'SU', 'MO', 'TU', 'WE', 'TH', 'FR', 'SA'])
+    .describe("'day' for a day of the month, or a weekday code"),
+  value: z.number().int().describe('Day 1 to 31, or week 1 to 5 of the month; -1 is the last'),
 }).strict();
 
 export const PATTERNS_NEED_MONTHLY =
   "patterns apply only to frequency 'monthly'; omit patterns or send patterns: []";
 export const DAY_PATTERN_RANGE = "a 'day' pattern value must be 1 to 31, or -1 for the last day";
 export const WEEKDAY_PATTERN_RANGE = 'a weekday pattern value must be 1 to 5 (nth), or -1 (last)';
+// #786: upstream validates a recurrence only when it previews dates, never on create or update, so
+// these are refused here, before any write.
+export const END_OCCURRENCES_REQUIRED = 'endOccurrences is required when endMode is after_n_occurrences';
+export const END_DATE_REQUIRED = 'endDate is required when endMode is on_date';
+export const END_BEFORE_START = 'endDate must not be before start';
 
 // The object is strict: a plain z.object STRIPS unknown keys, which is how a `patterns` field
 // used to vanish while the create reported success (#478). Every key upstream's RecurConfig
@@ -24,7 +32,7 @@ export const WEEKDAY_PATTERN_RANGE = 'a weekday pattern value must be 1 to 5 (nt
 export const RecurConfigSchema = z.object({
   frequency: z.enum(['daily', 'weekly', 'monthly', 'yearly'])
     .describe('How often it repeats'),
-  start: z.string().regex(/^\d{4}-\d{2}-\d{2}$/)
+  start: oneOffDateSchema
     .describe('Start date, YYYY-MM-DD'),
   // Optional because upstream reads a schedule back without endMode when none was set and
   // treats a missing one as never; passed through as given, no default injected.
@@ -40,7 +48,7 @@ export const RecurConfigSchema = z.object({
     .describe('Friday before or Monday after. Requires skipWeekend'),
   endOccurrences: z.number().int().positive().optional()
     .describe('Required when endMode is after_n_occurrences'),
-  endDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional()
+  endDate: oneOffDateSchema.optional()
     .describe('YYYY-MM-DD. Required when endMode is on_date'),
 }).strict().superRefine((cfg, ctx) => {
   const patterns = cfg.patterns ?? [];
@@ -48,6 +56,22 @@ export const RecurConfigSchema = z.object({
   // patterns: [], and a client echoing it must not be refused.
   if (patterns.length > 0 && cfg.frequency !== 'monthly') {
     ctx.addIssue({ code: 'custom', path: ['patterns'], message: PATTERNS_NEED_MONTHLY });
+  }
+  // #786: read-back echoes stay accepted (endDate or endOccurrences with another endMode, and
+  // weekendSolveMode without skipWeekend); only a mode missing the field it needs is refused.
+  if (cfg.endMode === 'after_n_occurrences' && cfg.endOccurrences === undefined) {
+    ctx.addIssue({ code: 'custom', path: [], message: END_OCCURRENCES_REQUIRED });
+  }
+  if (cfg.endMode === 'on_date' && cfg.endDate === undefined) {
+    ctx.addIssue({ code: 'custom', path: [], message: END_DATE_REQUIRED });
+  }
+  // Both must be real days (a bad one already has its own issue); YYYY-MM-DD compares as a
+  // string, and an equal pair is allowed.
+  // Only under on_date: upstream reads endDate in no other mode, and the Actual UI stores a
+  // leftover endDate next to endMode never. Refusing that echo broke an update that sends a
+  // stored recurrence back (review of #786), so do not widen this to every mode again.
+  if (cfg.endMode === 'on_date' && cfg.endDate !== undefined && isCalendarDay(cfg.start) && isCalendarDay(cfg.endDate) && cfg.endDate < cfg.start) {
+    ctx.addIssue({ code: 'custom', path: [], message: END_BEFORE_START });
   }
   // The index in the path and the pattern in the message tell a caller which entry to fix
   // when several are sent.

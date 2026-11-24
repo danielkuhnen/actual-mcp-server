@@ -35,7 +35,7 @@ Requests travel over stdin, responses come back over stdout, and all server logs
 ┌─────────────┐   MCP/HTTP   ┌──────────────────┐   Actual API   ┌──────────────┐
 │  AI Client  │ ◄──────────► │  Actual MCP      │ ◄───────────► │   Actual     │
 │ (LibreChat  │              │  Server          │               │   Budget     │
-│  LobeChat)  │              │  (85 tools)      │               │   Server     │
+│  LobeChat)  │              │  (compact)       │               │   Server     │
 └─────────────┘              └──────────────────┘               └──────────────┘
 ```
 
@@ -45,6 +45,10 @@ The client speaks JSON-RPC 2.0 to the server, which turns each tool call into Ac
 |-----------|---------|------|----------|
 | `--stdio` | Spawned by the client on demand | None (OS process) | Local single-user use: Claude Desktop, Claude Code, Cursor, VS Code, Gemini CLI, Codex |
 | `--http` | Always-on service (Docker or systemd) | Bearer token or OIDC | Shared or multi-user deployments: LibreChat, LobeChat, remote access |
+
+## Prompts
+
+The server also offers MCP prompts (ready-made starting messages) when the tools they use are available. How a client shows them varies: Claude Desktop lists them as slash-style entries, while many chat UIs do not surface prompts at all.
 
 ## Your Actual Budget credentials
 
@@ -92,7 +96,7 @@ Then add `. ~/.config/actual-mcp/env` to `~/.bashrc` or `~/.zshrc`, and start th
 
 Claude Desktop through `mcp-remote`, Claude Code and Codex over HTTP, LibreChat and LobeChat all connect to a running server. Start it in Docker.
 
-First create `.env` with a generated token: run the step 1 block of the [README Docker quick start](../../../README.md#quick-start-docker-http). It prints the token. Then fill in `ACTUAL_PASSWORD`, `ACTUAL_BUDGET_SYNC_ID` and `ACTUAL_SERVER_URL` in `.env`. Inside the container `localhost` is the container itself, so use your Actual server's LAN address or domain, or `http://host.docker.internal:5006` when Actual runs on the Docker host. Then, in the directory that holds `.env`:
+First create `.env` with a generated token: run the step 1 block of the [README HTTP and Docker quick start](../../../README.md#run-it-over-http-docker). It prints the token. Then fill in `ACTUAL_PASSWORD`, `ACTUAL_BUDGET_SYNC_ID` and `ACTUAL_SERVER_URL` in `.env`. Inside the container `localhost` is the container itself, so use your Actual server's LAN address or domain, or `http://host.docker.internal:5006` when Actual runs on the Docker host. Then, in the directory that holds `.env`:
 
 <!-- runnable: http-docker-run -->
 ```bash
@@ -139,7 +143,7 @@ curl -s -X POST http://localhost:3600/http \
   | python3 -c "import json,sys; data=json.load(sys.stdin); print(f'{len(data[\"result\"][\"tools\"])} tools loaded')"
 ```
 
-With every toolset published, the `tools/list` response should list 85 tools, and a connected client shows 85 tools loaded with the `actual_` prefix. A smaller number is expected when `MCP_TOOLSETS`, `MCP_TOOLS` or `MCP_READ_ONLY` is set.
+With every toolset published, the `tools/list` response should list the 15 compact tools (`get_context`, `list_entities` and the `manage_*` family, none with an `actual_` prefix). A smaller number is expected when `MCP_TOOLSETS`, `MCP_TOOLS` or `MCP_READ_ONLY` is set. A client that still calls the 85 `actual_*` tools needs `MCP_TOOL_SURFACE=legacy` on the server; the [migration guide](../migrating-to-compact-tools.md) maps each old name to its compact call.
 
 For a stdio client, check the server by hand before blaming the client. From a shell that loaded the env file above, send one `initialize` request (`sleep` keeps stdin open long enough for the reply):
 

@@ -90,6 +90,36 @@ export async function callTool(
   args: Record<string, unknown> = {},
   mcpUrl = DEFAULT_MCP_SERVER_URL,
 ): Promise<any> {
+  const result = await callToolEnvelope(request, sessionId, toolName, args, mcpUrl);
+  throwIfToolError(toolName, result);
+  return result;
+}
+
+/**
+ * #769: a tool failure is an `isError` RESULT, not a JSON-RPC error. `call` and `callTool` keep
+ * their historic contract (a failed tool throws, with the tool's own text as the message) by
+ * converting it here; `raw` and `callToolEnvelope` return the result untouched so a test can
+ * assert on the isError shape itself.
+ */
+export function throwIfToolError(toolName: string, result: any, onlyRateLimit = false): void {
+  if (result?.isError === true) {
+    const text = result.content?.find?.((c: any) => c?.type === 'text')?.text;
+    if (onlyRateLimit && !/too many requests|rate ?limit/i.test(String(text))) return;
+    throw new Error(`Tool ${toolName} failed: ${typeof text === 'string' ? text : JSON.stringify(result.content)}`);
+  }
+}
+
+/**
+ * `callTool` without the isError conversion: a JSON-RPC protocol error (-32602 unknown tool,
+ * malformed params) still throws, a tool failure comes back as the `{ isError: true }` result.
+ */
+export async function callToolEnvelope(
+  request: any,
+  sessionId: string,
+  toolName: string,
+  args: Record<string, unknown> = {},
+  mcpUrl = DEFAULT_MCP_SERVER_URL,
+): Promise<any> {
   const rpcUrl = `${mcpUrl}${HTTP_PATH}`;
   const payload = {
     jsonrpc: '2.0',
@@ -151,8 +181,9 @@ export async function callTool(
  * op + sync (2 requests) and a read is 1, so a write-heavy BLOCK (the transactions and budgets
  * runs) peaks near 1.8. At 300 calls that block reached ~540 requests and tripped the limiter
  * (#383: 2 stdio failures at spec lines 686 to 697, over the SYNC path, after #422 removed the
- * relogin cascade that had masked the real ratio). 230 calls at 1.8 is ~415 requests, inside
- * 500 with margin, at the cost of a longer wall clock. The stdio leg is the tighter one: it
+ * relogin cascade that had masked the real ratio). 230 calls at 1.8 is ~415 requests, which
+ * looked inside 500 with margin until #681 showed a denser block (see the constant below: the
+ * HTTP budget is 200 now, and 1.8 is NOT the peak). The stdio leg is the tighter one: it
  * runs host-side over docker exec and never reached the old 300 budget, so lowering it is what
  * actually engages the pacer there.
  */
@@ -184,8 +215,14 @@ const RATE_WINDOW_MS = 60_000;
  * 2.4 minutes to 5.2 minutes. A pacer that never slept could not have more than doubled the
  * runtime. The extra time IS the pacer holding calls back, which is the cost being paid.
  */
+// #681: the HTTP budget went from 230 to 200. With the suite grown by the legacy smoke block and
+// the prompts rows, a run at 230 held the pacer 47 times and still tripped the limiter inside the
+// schedules block (a schedule write is the densest call the suite makes: op, rule and sync), which
+// then cascaded into 15 failures. Tripping 500 requests at 230 calls means that block runs at
+// 2.17 requests per call or more, above the 1.8 the comment further up took as the peak, so 200
+// calls is ~435 requests there: the margin is thin. Do not raise this back from these numbers.
 const RATE_MAX_CALLS_PER_WINDOW =
-  process.env.MCP_TEST_TRANSPORT === 'stdio' ? 90 : 230;
+  process.env.MCP_TEST_TRANSPORT === 'stdio' ? 90 : 200;
 const recentCallTimes: number[] = [];
 
 /** Block until sending one more call keeps us inside the window budget. */
@@ -244,9 +281,27 @@ export async function callToolPaced(
   toolName: string,
   args: Record<string, unknown> = {},
 ): Promise<any> {
+  return paced(toolName, () => callTool(request, sessionId, toolName, args));
+}
+
+/** `callToolEnvelope`, paced the same way: the result is returned untouched, isError included. */
+export async function callToolPacedEnvelope(
+  request: any,
+  sessionId: string,
+  toolName: string,
+  args: Record<string, unknown> = {},
+): Promise<any> {
+  return paced(toolName, () => callToolEnvelope(request, sessionId, toolName, args));
+}
+
+async function paced(_toolName: string, run: () => Promise<any>): Promise<any> {
   await pace();
   try {
-    return await callTool(request, sessionId, toolName, args);
+    const out = await run();
+    // The envelope variant returns an isError result instead of throwing, so look for the
+    // limiter in its text too (#769): a rate limit is never an outcome a test asserts on.
+    if (out?.isError === true) throwIfToolError(_toolName, out, true);
+    return out;
   } catch (error) {
     if (isRateLimitError(error)) {
       throw new Error(

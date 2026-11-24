@@ -18,7 +18,7 @@ console.log('Running generated tools smoke tests');
   const apiMod = await import('@actual-app/api');
   const apiDefault = (apiMod.default || apiMod);
   apiDefault.sync = async () => {};
-  // #371: accounts_close, accounts_reopen and budgets_holdForNextMonth used to reach the raw
+  // #371: accounts_close, accounts_reopen and budgets_hold_for_next_month used to reach the raw
   // api directly and needed faithful raw fakes here. Their guards now live in the adapter,
   // which this harness stubs wholesale, so the raw fakes are gone and the adapter stubs
   // below carry the contract instead. See stubResponses for the shapes they must return.
@@ -76,7 +76,7 @@ console.log('Running generated tools smoke tests');
     createCategoryGroup: 'grp-new',
     deleteCategoryGroup: null,
     updateCategoryGroup: null,
-    getPayees: [{ id: 'p1', name: 'Kroger' }],
+    getPayees: [{ id: 'p1', name: 'Kroger' }, { id: '40000000-0000-4000-8000-000000000001', name: 'Rules Payee' }], // #818: the payee_rules_get fixture id must exist, an unknown payee is refused
     getCommonPayees: [{ id: 'p1', name: 'Kroger' }],
     getPayeeRules: [{ id: '30000000-0000-4000-8000-000000000001', conditions: [] }],
     createPayee: 'p-new',
@@ -126,7 +126,7 @@ console.log('Running generated tools smoke tests');
     },
     createAccount: 'acct-new',
     updateAccount: null,
-    deleteAccount: null,
+    deleteAccount: { detachedTransfers: 0 },
     // #371: closeAccount reports WHICH outcome happened; a bare null would make the tool
     // dereference `.name` on nothing.
     closeAccount: { outcome: 'closed', name: 'Cash' },
@@ -251,18 +251,18 @@ console.log('Running generated tools smoke tests');
   if (name.includes('payees_update')) inputExample.id = '00000000-0000-0000-0000-000000000001', inputExample.fields = { name: 'Updated' };
   if (name.includes('payees_merge')) inputExample.targetId = '11111111-1111-4111-8111-111111111111', inputExample.mergeIds = ['22222222-2222-4222-8222-222222222222', '33333333-3333-4333-8333-333333333333'];
   if (name.includes('payee_rules_get')) inputExample.payeeId = '40000000-0000-4000-8000-000000000001';
-  if (name.includes('rules_create') && !name.includes('or_update') && !name.includes('batch')) inputExample.conditions = [{ field: 'description', op: 'contains', value: 'test' }], inputExample.actions = [{ op: 'set', field: 'category', value: '00000000-0000-0000-0000-000000000001' }];
+  if (name.includes('rules_create') && !name.includes('or_update') && !name.includes('batch')) inputExample.conditions = [{ field: 'notes', op: 'contains', value: 'test' }], inputExample.actions = [{ op: 'set', field: 'category', value: '00000000-0000-0000-0000-000000000001' }];
   // #485: rules_create_batch takes an array of rules (the plain rules_create example above must not match it).
-  if (name.includes('rules_create_batch')) inputExample.rules = [{ conditions: [{ field: 'description', op: 'contains', value: 'test' }], actions: [{ op: 'set', field: 'category', value: '00000000-0000-0000-0000-000000000001' }] }];
-  if (name.includes('rules_create_or_update')) inputExample.conditions = [{ field: 'description', op: 'contains', value: 'test' }], inputExample.actions = [{ op: 'set', field: 'category', value: '00000000-0000-0000-0000-000000000001' }];
+  if (name.includes('rules_create_batch')) inputExample.rules = [{ conditions: [{ field: 'notes', op: 'contains', value: 'test' }], actions: [{ op: 'set', field: 'category', value: '00000000-0000-0000-0000-000000000001' }] }];
+  if (name.includes('rules_create_or_update')) inputExample.conditions = [{ field: 'notes', op: 'contains', value: 'test' }], inputExample.actions = [{ op: 'set', field: 'category', value: '00000000-0000-0000-0000-000000000001' }];
   if (name.includes('rules_delete')) inputExample.id = '30000000-0000-4000-8000-000000000001'; // matches getRules stub: { id: '30000000-0000-4000-8000-000000000001' }
-  if (name.includes('rules_update')) inputExample.id = '30000000-0000-4000-8000-000000000001', inputExample.fields = { conditions: [] };
-  if (name.includes('budgets_setAmount')) inputExample.month = '2025-12', inputExample.categoryId = '10000000-0000-4000-8000-000000000001', inputExample.amount = 100;
-  if (name.includes('budgets_getMonth')) inputExample.month = '2025-12';
+  if (name.includes('rules_update')) inputExample.id = '30000000-0000-4000-8000-000000000001', inputExample.fields = { conditions: [{ field: 'notes', op: 'contains', value: 'test' }] };
+  if (name.includes('budgets_set_amount')) inputExample.month = '2025-12', inputExample.categoryId = '10000000-0000-4000-8000-000000000001', inputExample.amount = 100;
+  if (name.includes('budgets_get_month')) inputExample.month = '2025-12';
   if (name.includes('budget_updates_batch')) inputExample.operations = [{ month: '2025-12', categoryId: '10000000-0000-4000-8000-000000000001', amount: 100 }];
-  if (name.includes('budgets_holdForNextMonth')) inputExample.month = '2025-12', inputExample.amount = 10000;
-  if (name.includes('budgets_resetHold')) inputExample.month = '2025-12'; // no categoryId — tool operates on whole month
-  if (name.includes('budgets_setCarryover')) inputExample.month = '2025-12', inputExample.categoryId = '10000000-0000-4000-8000-000000000001', inputExample.flag = true;
+  if (name.includes('budgets_hold_for_next_month')) inputExample.month = '2025-12', inputExample.amount = 10000;
+  if (name.includes('budgets_reset_hold')) inputExample.month = '2025-12'; // no categoryId — tool operates on whole month
+  if (name.includes('budgets_set_carryover')) inputExample.month = '2025-12', inputExample.categoryId = '10000000-0000-4000-8000-000000000001', inputExample.flag = true;
   // #332: a fixed name keeps the smoke run from accumulating timestamped files.
   if (name.includes('budgets_export')) inputExample.filename = 'smoke-export.zip';
   // #334: the schema requires exactly one of path/base64; base64 avoids needing a real file.
@@ -308,9 +308,9 @@ console.log('Running generated tools smoke tests');
       // List/get tools that return a { result } wrapper
       // accounts_create / payees_create use createTool which wraps the returned id in { result }
       const resultWrappers = ['accounts_list', 'categories_get',
-        'payees_get', 'budgets_getMonth', 'budgets_getMonths', 'budgets_get_all',
+        'payees_get', 'budgets_get_month', 'budgets_get_months', 'budgets_get_all',
         'query_run', 'transactions_filter', 'transactions_get', 'transactions_import',
-        'bank_sync', 'budgets_setAmount', 'budgets_transfer',
+        'bank_sync', 'budgets_set_amount', 'budgets_transfer',
         'accounts_create', 'payees_create', 'get_context'];
       if (resultWrappers.includes(n)) {
         if (!res || !('result' in res)) shapeErr(`expected { result } wrapper`);
@@ -340,8 +340,8 @@ console.log('Running generated tools smoke tests');
         'rules_delete', 'rules_update',
         'schedules_delete', 'schedules_update',
         'transactions_delete', 'transactions_update',
-        'budgets_resetHold', 'budgets_holdForNextMonth',
-        'budgets_setCarryover'];
+        'budgets_reset_hold', 'budgets_hold_for_next_month',
+        'budgets_set_carryover'];
       if (successTools.includes(n)) {
         if (!res || res.success !== true) shapeErr(`expected success=true`);
       }

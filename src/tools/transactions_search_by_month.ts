@@ -1,20 +1,26 @@
 import { z } from 'zod';
 import type { ToolDefinition } from '../../types/tool.d.js';
 import adapter from '../lib/actual-adapter.js';
+import { expandSplitsForSearch } from '../lib/split-search.js';
+import { idSetByName } from '../lib/actual-adapter/filter-ids.js';
+import { refuseOffBudgetAccount } from '../lib/search-account-guard.js';
 
 const InputSchema = z.object({
-  month: z.string().optional().describe('Month to search in YYYY-MM format (e.g., "2025-01" for January 2025) - defaults to current month'),
-  accountId: z.string().optional().describe('Optional: Filter by specific account ID'),
-  categoryName: z.string().optional().describe('Optional: Filter by category name (e.g., "Food", "Rent")'),
-  payeeName: z.string().optional().describe('Optional: Filter by payee name'),
-  minAmount: z.number().optional().describe('Optional: Minimum amount in cents (use negative for expenses)'),
-  maxAmount: z.number().optional().describe('Optional: Maximum amount in cents'),
-  limit: z.number().optional().default(100).describe('Optional: Maximum number of transactions to return (default: 100)'),
+  month: z.string().optional().describe('Month to search in YYYY-MM format, e.g. "2025-01" (default: the current month)'),
+  accountId: z.string().optional().describe('Filter by specific account ID'),
+  categoryName: z.string().optional().describe('Filter by category name (e.g., "Food", "Rent")'),
+  payeeName: z.string().optional().describe('Filter by payee name'),
+  minAmount: z.number().optional().describe('Minimum amount in cents (use negative for expenses)'),
+  maxAmount: z.number().optional().describe('Maximum amount in cents'),
+  limit: z.number().optional().default(100).describe('Maximum number of transactions to return'),
 });
 
 const tool: ToolDefinition = {
   name: 'actual_transactions_search_by_month',
-  description: 'Search transactions for a specific month. Returns all transactions matching the month and optional filters (account, category, payee, amount range). Efficiently queries by date range.',
+  description:
+    'Search the transactions of one calendar month (month as YYYY-MM, default the current month), optionally narrowed by accountId, categoryName, payeeName (case-insensitive exact names) and an amount range in integer cents. Read-only; off-budget accounts are excluded, and an off-budget accountId is refused. ' +
+    'Returns up to limit rows (default 100), newest first, as { transactions, count, totalAmount, hasMore, month }. count and totalAmount cover only the returned rows (hasMore is true when more rows matched), so raise limit for a full total. With categoryName, a split is matched by its children; rows carry parent_id. ' +
+    'An unknown category or payee name returns an empty list with an error field. For other date ranges or aggregation use actual_query_run.',
   inputSchema: InputSchema,
   call: async (args: unknown, _meta?: unknown) => {
     const input = InputSchema.parse(args || {});
@@ -31,6 +37,8 @@ const tool: ToolDefinition = {
     // `verifyExists: true` keeps the existence check this tool already paid for.
     if (input.accountId) {
       await adapter.resolveFilterId('account', input.accountId, { verifyExists: true, rows: accounts });
+      // #756: an explicit off-budget account is refused, not answered with an empty list.
+      refuseOffBudgetAccount(accounts, input.accountId);
     }
 
     // Default to current month if not provided
@@ -57,6 +65,7 @@ const tool: ToolDefinition = {
         transactions: [],
         count: 0,
         totalAmount: 0,
+        hasMore: false,
         month,
       };
     }
@@ -74,20 +83,21 @@ const tool: ToolDefinition = {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let filtered = allTransactions.filter((t: any) => !offBudgetIds.has(t?.account));
     
-    // Filter by category name (need to lookup category ID)
+    // Filter by category name (need to lookup category ID). #750: a split parent has a null
+    // category, so the split is replaced by its children, once the category is known to exist.
     if (input.categoryName) {
       const categories = await adapter.getCategories();
-      const category = categories.find((c: any) =>
-        c.name && c.name.toLowerCase() === input.categoryName!.toLowerCase()
-      );
-      if (category) {
-        filtered = filtered.filter((t: any) => t.category === category.id);
+      const categoryIds = idSetByName(categories, input.categoryName);
+      if (categoryIds.size > 0) {
+        filtered = expandSplitsForSearch(filtered).rows;
+        filtered = filtered.filter((t: any) => categoryIds.has(t.category));
       } else {
         // Category not found - return empty
         return {
           transactions: [],
           count: 0,
           totalAmount: 0,
+          hasMore: false,
           month,
           error: `Category "${input.categoryName}" not found`,
         };
@@ -97,17 +107,16 @@ const tool: ToolDefinition = {
     // Filter by payee name (need to lookup payee ID)
     if (input.payeeName) {
       const payees = await adapter.getPayees();
-      const payee = payees.find((p: any) =>
-        p.name && p.name.toLowerCase() === input.payeeName!.toLowerCase()
-      );
-      if (payee) {
-        filtered = filtered.filter((t: any) => t.payee === payee.id);
+      const payeeIds = idSetByName(payees, input.payeeName);
+      if (payeeIds.size > 0) {
+        filtered = filtered.filter((t: any) => payeeIds.has(t.payee));
       } else {
         // Payee not found - return empty
         return {
           transactions: [],
           count: 0,
           totalAmount: 0,
+          hasMore: false,
           month,
           error: `Payee "${input.payeeName}" not found`,
         };
@@ -129,7 +138,9 @@ const tool: ToolDefinition = {
       return dateB.localeCompare(dateA);
     });
     
+    // #755: computed against the slice, so it agrees with the rows returned even for a negative limit.
     const limited = filtered.slice(0, input.limit || 100);
+    const hasMore = filtered.length > limited.length;
     
     // Enrich transactions with account names (reuse already-fetched accounts)
     const accountMap = new Map(accounts.map((acc: any) => [acc.id, acc.name]));
@@ -146,6 +157,7 @@ const tool: ToolDefinition = {
       transactions: enrichedTransactions,
       count: enrichedTransactions.length,
       totalAmount,
+      hasMore,
       month,
     };
   },

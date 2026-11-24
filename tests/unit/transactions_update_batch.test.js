@@ -6,6 +6,8 @@
 process.env.ACTUAL_SERVER_URL     = process.env.ACTUAL_SERVER_URL     ?? 'http://localhost:5006';
 process.env.ACTUAL_BUDGET_SYNC_ID = process.env.ACTUAL_BUDGET_SYNC_ID ?? '00000000-0000-0000-0000-000000000000';
 process.env.ACTUAL_PASSWORD       = process.env.ACTUAL_PASSWORD       ?? 'dummy';
+// #680: these tests call the legacy actual_* tools through the manager, so they pin the legacy surface.
+process.env.MCP_TOOL_SURFACE = 'legacy';
 
 let failures = 0;
 const pass = (l) => console.log(`  ✓ ${l}`);
@@ -47,7 +49,7 @@ const HINT = '(Array of {id, fields} objects. Maximum 50 per batch (higher value
     const fiftyOne = Array.from({ length: 51 }, (_, i) =>
       ({ id: `50000000-0000-4000-8000-${String(i).padStart(12, '0')}`, fields: { notes: 'x' } }));
     await rejectsWith({ updates: fiftyOne }, 'Validation error: updates: must be at most 50 items', '51 items');
-    await rejectsWith({ updates: [{ id: 'not-a-uuid', fields: {} }] },
+    await rejectsWith({ updates: [{ id: 'not-a-uuid', fields: { notes: 'x' } }] },
       'Validation error: updates.0.id: Invalid transaction ID format (expected UUID)', 'non-UUID id');
     eq(adapterCalls, 0, 'adapter never called for invalid input');
 

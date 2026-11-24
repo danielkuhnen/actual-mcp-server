@@ -17,17 +17,23 @@ Every page under `docs/` is listed here, grouped by what you came to do. `npm ru
 - [guides/authentication.md](guides/authentication.md): choose an HTTP auth mode and see which budgets each one reaches.
 - [guides/multiple-budgets.md](guides/multiple-budgets.md): configure several budgets and switch between them.
 - [guides/upgrading.md](guides/upgrading.md): upgrade steps, requirements, and changes that can stop a server from starting.
+- [guides/migrating-to-compact-tools.md](guides/migrating-to-compact-tools.md): moving from the 85 `actual_*` tools to the 15 compact tools: the generated name table, the `MCP_TOOL_SURFACE=legacy` escape hatch and re-selecting saved tool choices.
 - [guides/troubleshooting.md](guides/troubleshooting.md): common symptoms with their cause and fix.
 
 ## Reference: look something up
 
 - [reference/configuration.md](reference/configuration.md): every environment variable, with type, default and source.
 - [reference/tools.md](reference/tools.md): every tool, grouped by domain, with its description and caveats.
+- [reference/prompts.md](reference/prompts.md): every MCP prompt, with its arguments, required tools and when it is offered.
 
 ## Explanation: understand how it works
 
 - [explanation/architecture.md](explanation/architecture.md): components, transports and data flow.
+- [architecture/README.md](architecture/README.md): architecture decision records (ADRs) and their index.
+- [architecture/0001-pr-per-code-ticket-trial-for-coderabbit-review.md](architecture/0001-pr-per-code-ticket-trial-for-coderabbit-review.md): ADR 0001, the five-ticket pull request trial for CodeRabbit review.
+- [architecture/0002-keep-the-pr-flow-for-code-tickets-maintainer-docs-stay-direct.md](architecture/0002-keep-the-pr-flow-for-code-tickets-maintainer-docs-stay-direct.md): ADR 0002, the pull request flow kept for code tickets, maintainer docs direct (supersedes ADR 0001).
 - [explanation/security-and-privacy.md](explanation/security-and-privacy.md): auth model, threat model and hardening.
+- [explanation/compact-tool-surface.md](explanation/compact-tool-surface.md): the 15-tool compact surface: decision record, naming rules and the mapping of all 85 tools.
 
 ## Development: change the project
 

@@ -1,10 +1,12 @@
 import { z } from 'zod';
 import type { ToolDefinition } from '../../types/tool.d.js';
+import { localIsoDate } from '../lib/localDate.js';
 import adapter from '../lib/actual-adapter.js';
+import { CommonSchemas } from '../lib/schemas/common.js';
 
 const InputSchema = z.object({
-  startDate: z.string().optional().describe('Start date in YYYY-MM-DD format (default: first day of current month)'),
-  endDate: z.string().optional().describe('End date in YYYY-MM-DD format (default: today)'),
+  startDate: CommonSchemas.date.optional().describe('Start date in YYYY-MM-DD format (default: first day of current month)'),
+  endDate: CommonSchemas.date.optional().describe('End date in YYYY-MM-DD format (default: today)'),
   accountId: z.string().optional().describe('Optional: Filter by specific account ID'),
   includeIncome: z.boolean().optional().default(false).describe('Optional: Include income categories (default: false, only expenses)'),
 });
@@ -21,11 +23,11 @@ const tool: ToolDefinition = {
     // unchanged.
     if (input.accountId) await adapter.resolveFilterId('account', input.accountId);
     
-    // Default to current month if dates not provided
+    // Default to the current month to date, as LOCAL calendar days (localIsoDate says why).
     const today = new Date();
     const firstDayOfMonth = new Date(today.getFullYear(), today.getMonth(), 1);
-    const startDate = input.startDate || firstDayOfMonth.toISOString().split('T')[0];
-    const endDate = input.endDate || today.toISOString().split('T')[0];
+    const startDate = input.startDate || localIsoDate(firstDayOfMonth);
+    const endDate = input.endDate || localIsoDate(today);
     
     // Build ActualQL query with groupBy and aggregation
     const api = await import('@actual-app/api');

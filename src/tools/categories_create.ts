@@ -2,19 +2,21 @@ import { z } from 'zod';
 import type { ToolDefinition } from '../../types/tool.d.js';
 import adapter from '../lib/actual-adapter.js';
 import { CommonSchemas } from '../lib/schemas/common.js';
-import { withLogMessage } from '../lib/errors.js';
+import { isPreflightRefusal, withLogMessage } from '../lib/errors.js';
 
 const InputSchema = z.object({ 
   name: CommonSchemas.name, 
   group_id: CommonSchemas.categoryGroupId,
-  is_income: z.boolean().nullable().optional(),
+  is_income: z.boolean().nullable().optional()
+    .describe('must match the group; omitted or null takes the group\'s flag'),
 }).passthrough(); // Allow other fields to pass through
 
 // RESPONSE_TYPE: string
 
 const tool: ToolDefinition = {
   name: 'actual_categories_create',
-  description: "Create a category. REQUIRED: group_id (category group UUID). Use actual_category_groups_get to find available groups. Optional: is_income (boolean, defaults to false for expense categories).",
+  description:
+    "Create a category inside a category group (group_id; find one with actual_category_groups_get). is_income defaults to the group's flag (an income group gives an income category); a different value is refused with a conflict refusal (nothing is created). An unknown group_id is refused with a not-found refusal (nothing is created). A name already used in that group is refused. Not idempotent. Returns { success: true, categoryId, message } with the new category id.",
   inputSchema: InputSchema,
   call: async (args: unknown, _meta?: unknown) => {
     // Zod validation errors are formatted centrally by actualToolsManager (#206).
@@ -22,11 +24,11 @@ const tool: ToolDefinition = {
 
     try {
       // Input already has correct field names (group_id, is_income)
-      // Convert null to false (LibreChat sometimes sends null instead of undefined)
-      const normalizedInput = {
+      // #764: forward is_income only when given (null counts as omitted); the adapter takes the group's flag.
+      const normalizedInput: { name: string; group_id: string; is_income?: boolean } = {
         name: input.name,
         group_id: input.group_id,
-        is_income: input.is_income ?? false,
+        ...(typeof input.is_income === 'boolean' ? { is_income: input.is_income } : {}),
       };
       
       const result = await adapter.createCategory(normalizedInput);
@@ -36,6 +38,8 @@ const tool: ToolDefinition = {
         message: `Category "${input.name}" created successfully`
       };
     } catch (error) {
+      // A typed refusal (unknown category group, #763) keeps its class and exact text.
+      if (isPreflightRefusal(error)) throw error;
       const errorMessage = error instanceof Error ? error.message : String(error);
       
       // Provide helpful error messages for common issues

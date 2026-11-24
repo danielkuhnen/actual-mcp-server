@@ -35,7 +35,7 @@
  */
 const REFUSAL_BRAND = Symbol.for('actual-mcp-server.PreflightRefusal');
 
-export type RefusalKind = 'not-found' | 'out-of-range';
+export type RefusalKind = 'not-found' | 'out-of-range' | 'conflict' | 'locked';
 
 /**
  * A pre-flight refusal: the operation was NOT attempted, because the request named
@@ -52,6 +52,19 @@ export class PreflightRefusal extends Error {
     // Restores the prototype chain when this is compiled down for an older target, so
     // `instanceof` keeps working on a subclass.
     Object.setPrototypeOf(this, new.target.prototype);
+  }
+}
+
+const lockedKeyRemedy = 'An operator can add or complete a BUDGET_n_* entry with this Sync ID and BUDGET_n_ENCRYPTION_PASSWORD, if every user the file is shared with may read it through this server.';
+
+/** Actual grants the file, but the server has no key to open it. */
+export class LockedRefusal extends PreflightRefusal {
+  static readonly hint = 'End-to-end encrypted and this server has no key for it. ' + lockedKeyRemedy;
+
+  constructor(syncId: string, count = 1) {
+    const message = `Budget ${syncId} is end-to-end encrypted and this server has no key for it. ${lockedKeyRemedy} Nothing was opened.`;
+    const suffix = count > 1 ? ` ${count - 1} more locked budgets are listed by actual_budgets_list_available.` : '';
+    super(message + suffix, 'locked');
   }
 }
 
@@ -95,6 +108,17 @@ export class OutOfRangeRefusal extends PreflightRefusal {
 }
 
 /**
+ * The request is well-formed but collides with something that already exists (#701: a tag name),
+ * or contradicts state the budget already holds (#768: a closing category the account pairing
+ * cannot keep).
+ */
+export class ConflictRefusal extends PreflightRefusal {
+  constructor(message: string) {
+    super(message, 'conflict');
+  }
+}
+
+/**
  * The check a tool uses to decide "structured refusal" versus "rethrow". Prefer this over
  * a bare `instanceof` so the brand fallback above applies.
  */
@@ -107,8 +131,8 @@ export function isPreflightRefusal(error: unknown): error is PreflightRefusal {
   );
 }
 
-/** The server setting that can hide a registered tool (#483). MCP_TOOLS only adds tools. */
-export type ToolUnavailableSetting = 'MCP_TOOLSETS' | 'MCP_READ_ONLY';
+/** The server setting that can hide a registered tool (#483, #671). MCP_TOOLS only adds tools. */
+export type ToolUnavailableSetting = 'MCP_TOOLSETS' | 'MCP_READ_ONLY' | 'MCP_TOOL_SURFACE';
 
 /**
  * A registered tool exists but this process does not publish it (#483), so the call is
@@ -120,16 +144,56 @@ export type ToolUnavailableSetting = 'MCP_TOOLSETS' | 'MCP_READ_ONLY';
 export class ToolUnavailableError extends Error {
   readonly tool: string;
   readonly setting: ToolUnavailableSetting;
+  /**
+   * `action` when a compact tool's ACTION is refused although the compact tool itself is
+   * published (#770); the MCP_TOOLSETS text then says the action is not enabled, not that a
+   * published tool is missing.
+   */
+  readonly scope: 'tool' | 'action';
 
-  constructor(tool: string, setting: ToolUnavailableSetting) {
+  /**
+   * @param surface the MCP_TOOL_SURFACE value, named in the message for that setting only.
+   * @param scope see the field; defaults to `tool`.
+   */
+  constructor(tool: string, setting: ToolUnavailableSetting, surface?: string, scope: 'tool' | 'action' = 'tool') {
     super(
       setting === 'MCP_READ_ONLY'
         ? `Tool "${tool}" is not available: it can change state and this server runs with MCP_READ_ONLY=true.`
-        : `Tool "${tool}" is not available: it is not published by this server's MCP_TOOLSETS configuration.`,
+        : setting === 'MCP_TOOL_SURFACE'
+          ? `Tool "${tool}" is not available: this server publishes the ${surface ?? 'configured'} tool surface (MCP_TOOL_SURFACE).${
+            surface === 'compact'
+              ? ' The legacy tools are published only with MCP_TOOL_SURFACE=legacy.'
+              : surface === 'legacy'
+                ? ' The compact tools are published only with MCP_TOOL_SURFACE=compact.'
+                : ''
+          }`
+          : scope === 'action'
+            ? `Tool "${tool}" is not available: this server's MCP_TOOLSETS configuration does not enable that action.`
+            : `Tool "${tool}" is not available: it is not published by this server's MCP_TOOLSETS configuration.`,
     );
     this.name = 'ToolUnavailableError';
     this.tool = tool;
     this.setting = setting;
+    this.scope = scope;
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
+}
+
+/**
+ * A tools/call named a tool this server has no registration for (#769). A PROTOCOL fault, not a
+ * tool outcome: the transports answer it as JSON-RPC -32602 "Unknown tool: <name>" (the example
+ * the MCP specification gives), where every other tool failure is an isError result. Carries the
+ * requested name and nothing else. The message keeps the historical "Tool not found: <name>" text
+ * so logs and the troubleshooting guide still match; decide on the class, never on that text.
+ * A registered tool that is merely not published is a ToolUnavailableError, not this.
+ */
+export class UnknownToolError extends Error {
+  readonly tool: string;
+
+  constructor(tool: string) {
+    super(`Tool not found: ${tool}`);
+    this.name = 'UnknownToolError';
+    this.tool = tool;
     Object.setPrototypeOf(this, new.target.prototype);
   }
 }

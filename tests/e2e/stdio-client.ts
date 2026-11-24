@@ -24,9 +24,10 @@
  */
 
 import { execFileSync } from 'node:child_process';
+import { CompleteResultSchema, McpError } from '@modelcontextprotocol/sdk/types.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
-import { pace, extractResult } from '../shared/e2e-helpers.js';
+import { pace, extractResult, throwIfToolError } from '../shared/e2e-helpers.js';
 
 /** The container the stdio server is exec'd into. Overridable for a differently-named stack. */
 export const STDIO_CONTAINER = process.env.MCP_STDIO_CONTAINER || 'mcp-server-e2e-test';
@@ -56,6 +57,12 @@ const SYNC_ID_FILE = process.env.MCP_STDIO_SYNC_ID_FILE || '/tmp/actual-sync-id.
 // container's CONFIGURED environment, and the configured ACTUAL_SERVER_URL is the HTTP leg's.
 const SERVER_URL_OVERRIDE = process.env.MCP_STDIO_SERVER_URL || '';
 
+// #681: which tool surface the exec'd server publishes. Unset means "inherit the container's own"
+// (`all` on the compose stack, so the legacy-bound rows and the compact rows both run). The
+// compact leg (tests/e2e/compact-surface.e2e.spec.ts, project docker-e2e-compact-stdio) sets it
+// to `compact`, which `docker exec -e` makes win over the container's configured value.
+const TOOL_SURFACE_OVERRIDE = process.env.MCP_E2E_TOOL_SURFACE || '';
+
 export type StdioSession = {
   raw(tool: string, args?: Record<string, unknown>): Promise<any>;
   call(tool: string, args?: Record<string, unknown>): Promise<any>;
@@ -65,6 +72,16 @@ export type StdioSession = {
   serverInfo(): { name: string; version: string } | undefined;
   /** #560: the tool names this server publishes, from `tools/list`. */
   listToolNames(): Promise<string[]>;
+  /** #641: the full tools/list entries (title, annotations, schemas), parsed by the SDK. */
+  listTools(): Promise<any[]>;
+  /** #660: the server capabilities from `initialize`, parsed by the SDK. */
+  serverCapabilities(): Promise<Record<string, unknown> | undefined>;
+  /** #660: prompts/list entries. */
+  listPrompts(): Promise<any[]>;
+  /** #660: prompts/get. A JSON-RPC error (an SDK McpError) is returned as `{ error }`, like the HTTP client. */
+  getPrompt(name: string, args?: Record<string, unknown>): Promise<{ result?: any; error?: { code: number; message: string } }>;
+  /** #775: completion/complete with the raw params. A JSON-RPC error is returned as `{ error }`, like the HTTP client. */
+  completePrompt(params: Record<string, unknown>): Promise<{ result?: any; error?: { code: number; message: string } }>;
   close(): Promise<void>;
 };
 
@@ -113,6 +130,7 @@ export async function openStdioSession(): Promise<StdioSession> {
       '-u', 'app',
       '-e', `MCP_BRIDGE_DATA_DIR=${DATA_DIR}`,
       ...(SERVER_URL_OVERRIDE ? ['-e', `ACTUAL_SERVER_URL=${SERVER_URL_OVERRIDE}`] : []),
+      ...(TOOL_SURFACE_OVERRIDE ? ['-e', `MCP_TOOL_SURFACE=${TOOL_SURFACE_OVERRIDE}`] : []),
       STDIO_CONTAINER,
       'sh', '-c',
       `export ACTUAL_BUDGET_SYNC_ID=$(cat ${SYNC_ID_FILE}) && exec node dist/src/index.js --stdio`,
@@ -147,10 +165,36 @@ export async function openStdioSession(): Promise<StdioSession> {
 
   return {
     raw,
-    call: async (tool, args = {}) => extractResult(await raw(tool, args)),
+    call: async (tool, args = {}) => {
+      const res = await raw(tool, args);
+      // #769: a tool failure is an isError result; `call` keeps throwing it, like the HTTP client.
+      throwIfToolError(tool, res);
+      return extractResult(res);
+    },
     instructions: () => client.getInstructions(),
     serverInfo: () => client.getServerVersion(),
     listToolNames: async () => (await client.listTools()).tools.map((t) => t.name),
+    listTools: async () => (await client.listTools()).tools,
+    serverCapabilities: async () => client.getServerCapabilities() as Record<string, unknown> | undefined,
+    listPrompts: async () => (await client.listPrompts()).prompts,
+    getPrompt: async (name, args) => {
+      try {
+        // The SDK types prompt arguments as strings; a test that passes another type is the test's bug.
+        return { result: await client.getPrompt({ name, ...(args ? { arguments: args as Record<string, string> } : {}) }) };
+      } catch (err) {
+        if (err instanceof McpError) return { error: { code: err.code, message: err.message } };
+        throw err;
+      }
+    },
+    completePrompt: async (params) => {
+      try {
+        // client.request does not validate the request params, so a malformed one reaches the server.
+        return { result: await client.request({ method: 'completion/complete', params } as any, CompleteResultSchema) };
+      } catch (err) {
+        if (err instanceof McpError) return { error: { code: err.code, message: err.message } };
+        throw err;
+      }
+    },
     close,
   };
 }

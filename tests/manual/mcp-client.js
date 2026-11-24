@@ -9,7 +9,7 @@
  *   const client = createClient({ url, rl });
  *   client.setToken('Bearer abc123');
  *   await client.initialize();
- *   const result = await client.callTool('actual_accounts_list', {});
+ *   const result = await client.callTool('list_entities', { type: 'account' });
  */
 
 import fetch from 'node-fetch';
@@ -199,6 +199,13 @@ export function createClient({ url, rl, fetchImpl, retryPauseMs }) {
       name: toolName,
       arguments: args,
     });
+
+    // #769: a tool failure is an isError result, not a JSON-RPC error. Throw it with the tool's
+    // own text, the way the failure used to arrive, so a module's try/catch still sees it.
+    if (response && response.isError === true) {
+      const block = Array.isArray(response.content) ? response.content.find((c) => c && c.type === 'text') : undefined;
+      throw new Error(block && typeof block.text === 'string' ? block.text : `tool ${toolName} failed`);
+    }
 
     // Unwrap MCP envelope: tools return { content: [{ text: '{"result":...}' }] }
     if (response && response.content && response.content[0]) {

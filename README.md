@@ -10,21 +10,56 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Node.js Version](https://img.shields.io/badge/node-%3E%3D22.0.0-brightgreen)](https://nodejs.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-7.0-blue)](https://www.typescriptlang.org/)
+[![actual-mcp-server MCP server: quality and maintenance score on Glama](https://glama.ai/mcp/servers/agigante80/actual-mcp-server/badges/score.svg)](https://glama.ai/mcp/servers/agigante80/actual-mcp-server)
 
-A [Model Context Protocol](https://modelcontextprotocol.io/) server that lets an AI assistant (Claude, LibreChat, LobeChat, Cursor and others) read and manage your self-hosted [Actual Budget](https://actualbudget.org/).
+Talk to your [Actual Budget](https://actualbudget.org/) in plain language: ask where the money went, and let your AI assistant make the changes you approve.
 
-**What you can ask it:** "How much did I spend on groceries last month, by payee?", "Add a $47.50 grocery transaction at Whole Foods to my checking account.", "Move $200 from Dining Out to Emergency Fund for this month."
+**What it lets you do:**
 
-**85 tools** across accounts, transactions, budgets, rules, schedules and more, over stdio or HTTP, with Bearer token or OIDC auth, per-user budget access, up to 15 concurrent sessions, and automatic retry of transient Actual errors (3 attempts, exponential backoff; deletes and merges are never retried).
+- Find where your money went, by payee, category or month.
+- Compare what you spent with what you planned, and see if you are on track.
+- Add, fix and categorise transactions, after you approve them.
+- Tidy up accounts, payees, categories and rules, and plan the month ahead.
 
-## Pick your path
+**Ask:** "How much did I spend on groceries last month, by payee?", "Am I on track this month?", "Which payees cost me the most this year?"
 
-- **Claude Desktop, Claude Code, Cursor, VS Code or another local client:** run it over stdio with `npx`, no server to keep running. Follow your client's page in [docs/guides/clients/](docs/guides/clients/README.md), for example [Claude Desktop](docs/guides/clients/claude-desktop.md) or [Claude Code](docs/guides/clients/claude-code.md).
-- **A chat UI such as LibreChat or LobeChat, or several users:** run it over HTTP in Docker with the quick start below, then follow [LibreChat](docs/guides/clients/librechat.md) or [LobeChat](docs/guides/clients/lobechat.md).
-- **A client that installs from the official [MCP Registry](https://registry.modelcontextprotocol.io/):** it is listed as `io.github.agigante80/actual-mcp-server`, with the npm package (stdio) and the Docker image (HTTP); the client asks for the same settings as the pages above.
-- **Unraid:** install it from [Community Applications](https://ca.unraid.net/apps/actual-mcp-server-0bghkvs0c7c8bg); see [Unraid](docs/guides/deployment.md#unraid-and-puidpgid-227).
+**Ask it to change things (it confirms first):** "Which uncategorised transactions look like my usual groceries? Categorise them after I confirm.", "Add a $47.50 grocery transaction at Whole Foods to my checking account.", "Move $200 from Dining Out to Emergency Fund for this month."
 
-## Quick start (Docker, HTTP)
+**Works with:** [Claude Desktop](docs/guides/clients/claude-desktop.md), [Claude Code](docs/guides/clients/claude-code.md), [Cursor](docs/guides/clients/cursor.md), [VS Code with Copilot](docs/guides/clients/vscode-copilot.md), [Gemini CLI](docs/guides/clients/gemini-cli.md) and [Codex CLI](docs/guides/clients/codex.md) on your own machine, and chat UIs such as [LibreChat](docs/guides/clients/librechat.md) and [LobeChat](docs/guides/clients/lobechat.md) against a server you run in Docker (also on [Unraid](https://ca.unraid.net/apps/actual-mcp-server-0bghkvs0c7c8bg) and in the official [MCP Registry](https://registry.modelcontextprotocol.io/) as `io.github.agigante80/actual-mcp-server`). It needs a client with MCP support: a hosted assistant that cannot reach your machine or private network cannot use it.
+
+## Quick start
+
+For Claude Code on your own machine, one command registers the server over stdio. It needs Node.js 22 or later and your Actual password in the `ACTUAL_PASSWORD` environment variable. The single quotes matter: your shell must not expand the reference, so the password never appears in the process list or in Claude Code's config.
+
+<!-- runnable: claude-code-add -->
+```bash
+claude mcp add --scope user actual-budget \
+  --env ACTUAL_SERVER_URL=http://localhost:5006 \
+  --env 'ACTUAL_PASSWORD=${ACTUAL_PASSWORD}' \
+  --env ACTUAL_BUDGET_SYNC_ID=your-sync-id-here \
+  --env MCP_BRIDGE_DATA_DIR=/absolute/path/to/data-dir \
+  -- npx -y actual-mcp-server --stdio
+```
+
+Replace the URL, the Sync ID (Actual: Settings, Show advanced settings, Sync ID) and the data directory, which should be a folder only you can read. Then check it under [Verify your setup](#verify-your-setup).
+
+**Or let Claude do it.** Paste this into a Claude Code session:
+
+```text
+Install and configure the Actual Budget MCP server for me over stdio, using
+`npx -y actual-mcp-server --stdio`. Ask me for my Actual server URL and my
+Sync ID. Take the password from the ACTUAL_PASSWORD environment variable that I
+have already set: never ask me to type it into this chat, never echo or log it,
+and never write it into a file in a repository. Create a data directory that
+only my user can read, register the server for my user with `claude mcp add
+--scope user`, passing the password as the literal reference
+'ACTUAL_PASSWORD=${ACTUAL_PASSWORD}' in single quotes, then run the checks
+under "Verify your setup" in the README.
+```
+
+**Other clients**: one page each in the [client guides](docs/guides/clients/README.md). Chat UIs (LibreChat, LobeChat) and several users need the HTTP path below.
+
+## Run it over HTTP (Docker)
 
 You need an [Actual Budget](https://actualbudget.org/) server and Docker. **1. Create `.env` with a generated token.** In an empty directory:
 
@@ -84,25 +119,72 @@ On a fresh `.env`, fill in the three Actual settings, then run the last line aga
 npx actual-mcp-server --http
 ```
 
+## Verify your setup
+
+1. In a new conversation in your client, ask: "List my Actual Budget accounts and their balances." You should get your accounts back.
+2. Over HTTP, `tools/list` should return **15 tools over 85 operations** (the default compact surface; 85 is the legacy surface under `MCP_TOOL_SURFACE=legacy`). The count comes from that HTTP check: the stdio `initialize` probe lists no tools.
+3. For a stdio client, check the server by hand before blaming the client: send one `initialize` request and look for `serverInfo` in the reply. The command is in [verify your setup](docs/guides/clients/README.md#verify) in the client guide.
+
+## Under the hood
+
+**15 tools over 85 operations** covering accounts, transactions, budgets, rules, schedules and more, over stdio or HTTP, with Bearer token or OIDC auth, per-user budget access, up to 15 concurrent sessions, and automatic retry of transient Actual errors (3 attempts, exponential backoff; deletes and merges are never retried).
+
 ## Privacy
 
 Budget data the tools return goes to whichever model provider your AI client uses. The server itself contacts only the configured Actual server and, when OIDC auth is configured, your identity provider (discovery and JWKS). Logs stay on the host you run it on. Details: [security and privacy](docs/explanation/security-and-privacy.md).
 
 ## Compatibility
 
-Node.js 22 or later, Actual Budget server 25.0.0 or later, and the bundled `@actual-app/api` (its version is in `package.json` and reported by the `actual_server_info` tool). Requirements and upgrade steps: [upgrading](docs/guides/upgrading.md).
+Node.js 22 or later, Actual Budget server 25.0.0 or later, and the bundled `@actual-app/api` (its version is in `package.json` and reported by `get_context` with `topic: "version"`). Requirements and upgrade steps: [upgrading](docs/guides/upgrading.md).
 
 ## Tools
 
-Every tool, with its description and caveats, is in the [tools reference](docs/reference/tools.md).
+Amounts are integer cents and dates are `YYYY-MM-DD` strings. Each tool takes an action or report selector; the fields of every action and its caveats are in the [tools reference](docs/reference/tools.md).
+
+<!-- BEGIN GENERATED: capabilities-tools -->
+<!-- Generated from dist/src/compact/registry.js by `npm run docs:gen`. Do not edit. -->
+
+### Context and lookup
+
+- **`get_context`**: Read the budget structure (accounts, categories, payees) or the Actual server details in one call. Example prompt: "What accounts and categories do I have?"
+- **`list_entities`**: List or look up accounts, categories, payees, rules, schedules, tags, notes or budget files, and resolve a name to an id. Example prompt: "List my payees whose name contains Market."
+
+### Reading transactions
+
+- **`search_transactions`**: Find transactions by date, account, category, payee or amount. Example prompt: "Show my Costco purchases over $100 this year."
+
+### Reports
+
+- **`summarize_transactions`**: Total spending and income by category, payee, account or month, find recurring expenses and read account balances. Example prompt: "How much did I spend on groceries each month this year?"
+
+### Budget months
+
+- **`list_budget_months`**: Read the list of budget months, or one month with budgeted, spent and balance per category. Example prompt: "Which categories are overspent in October 2026?"
+- **`manage_budget_months`**: Set a month budget amount, carryover or hold, move money between categories and write the month note. Example prompt: "Move $50 from Dining Out to Groceries for this month."
+
+### Querying
+
+- **`run_query`**: Run a read-only SQL query against the budget data when no other read tool fits. Example prompt: "Run a query for my uncleared transactions over $500 since January."
+
+### Changing data
+
+- **`manage_transactions`**: Create, change, delete, import, merge or transfer transactions. Example prompt: "Add a $12.50 coffee purchase to my checking account for today."
+- **`manage_accounts`**: Create, change, close, reopen, delete, bank-sync or annotate accounts and account groups. Example prompt: "Close my old savings account."
+- **`manage_categories`**: Create, change, delete or annotate budget categories and category groups. Example prompt: "Create a Pets category in the Everyday group."
+- **`manage_payees`**: Create, change, delete, merge or annotate payees. Example prompt: "Merge the payees Costco and Costco Wholesale."
+- **`manage_tags`**: Create, change or delete tags. Example prompt: "Create a tag called vacation with a blue color."
+- **`manage_rules`**: Create, upsert, change or delete the rules that categorize imported transactions. Example prompt: "Make a rule that files every Spotify transaction under Subscriptions."
+- **`manage_schedules`**: Create, change or delete one-off and recurring scheduled transactions. Example prompt: "Schedule my $900 rent on the first of every month."
+- **`manage_budget_files`**: Switch the active budget, import a budget file or export the active budget. Example prompt: "Export my budget to a file."
+<!-- END GENERATED: capabilities-tools -->
 
 ### Reducing the tool surface
 
-All 85 tools are published by default. Chat clients with a small tool budget (Gemini, LibreChat) do better with fewer. A tool that is not published is also refused if a client calls it by name.
+By default the server serves 15 tools over 85 operations (the compact surface, `MCP_TOOL_SURFACE=compact`). Set `MCP_TOOL_SURFACE=legacy` to publish the 85 `actual_*` tools instead; the toolset names and counts in the table below are operations, and a compact tool is listed when at least one operation behind it is selected. A call to an operation a toolset leaves out is refused naming `MCP_TOOLSETS`. A tool that is not published is also refused if a client calls it by name.
 
 <!-- BEGIN GENERATED: tools-summary -->
 <!-- Generated from dist/src/lib/toolsets.js by `npm run docs:gen`. Do not edit. -->
-| Toolset | Tools | Contents |
+| Toolset | Operations | Contents |
 |---------|-------|----------|
 | `context` | 14 | Orientation, lookups and server information |
 | `transactions` | 14 | Transaction reads, create, update, delete, import and transfers |
@@ -114,19 +196,59 @@ All 85 tools are published by default. Chat clients with a small tool budget (Ge
 | `query` | 1 | `actual_query_run` (SELECT only) |
 | `admin` | 6 | Budget switching, import, export, bank sync and session management |
 
-The `chat` preset publishes 12 tools: `actual_get_context`, `actual_query_run`, `actual_transactions_update_batch`, `actual_budget_updates_batch`, `actual_rules_create_batch`, `actual_transactions_create`, `actual_transactions_update`, `actual_transactions_delete`, `actual_rules_create`, `actual_budgets_transfer`, `actual_budgets_setAmount` and `actual_budgets_getMonth`.
+On the default compact surface the `chat` preset publishes 6 tools: `get_context`, `list_budget_months`, `run_query`, `manage_transactions`, `manage_rules` and `manage_budget_months`.
 
-`MCP_READ_ONLY=true` hides and refuses 48 write-capable tools and leaves 37 published.
+With `MCP_TOOL_SURFACE=legacy` the `chat` preset publishes 16 tools: `actual_get_context`, `actual_query_run`, `actual_transactions_update_batch`, `actual_budget_updates_batch`, `actual_rules_create_batch`, `actual_transactions_create`, `actual_transactions_update`, `actual_transactions_delete`, `actual_rules_create`, `actual_budgets_transfer`, `actual_budgets_set_amount`, `actual_budgets_get_month`, `actual_budgets_get_months`, `actual_server_info`, `actual_server_get_version` and `actual_preferences_get`.
+
+`MCP_READ_ONLY=true` publishes 6 compact tools (`get_context`, `list_entities`, `search_transactions`, `summarize_transactions`, `list_budget_months` and `run_query`); every tool that can write is hidden whole. With `MCP_TOOL_SURFACE=legacy` it hides and refuses 48 write-capable tools and leaves 37 published.
 <!-- END GENERATED: tools-summary -->
+
+How large the `tools/list` response is for each choice, so you can pick for a small tool budget:
+
+<!-- BEGIN GENERATED: capabilities-sizes -->
+<!-- Generated from scripts/docs/tools-list-sizes.json by `npm run docs:gen`. Do not edit. -->
+| Configuration | Tools | `tools/list` bytes | KiB |
+|---------------|-------|--------------------|-----|
+| Compact surface (default) | 15 | 44852 | 43.8 |
+| Compact, `MCP_TOOLSETS=chat` | 6 | 14697 | 14.4 |
+| Compact, `MCP_READ_ONLY=true` | 6 | 18207 | 17.8 |
+| `MCP_TOOL_SURFACE=legacy` | 85 | 127058 | 124.1 |
+| Legacy, `MCP_TOOLSETS=chat` | 16 | 29236 | 28.6 |
+| Legacy, `MCP_READ_ONLY=true` | 37 | 46242 | 45.2 |
+
+Measured offline, as the server builds the list (the bytes of the `tools/list` result, not an estimate); reproduce with `node scripts/measure-tools-list-size.mjs`.
+<!-- END GENERATED: capabilities-sizes -->
 
 Example: a chat assistant with two extra tools.
 
 ```bash
 MCP_TOOLSETS=chat
-MCP_TOOLS=actual_accounts_list,actual_payees_get
+MCP_TOOLS=list_entities,search_transactions
 ```
 
 A configuration that resolves to zero tools refuses to start. See [Security and Privacy](docs/explanation/security-and-privacy.md#tool-surface-mcp_toolsets-and-mcp_read_only).
+
+## Prompts
+
+Prompts are ready-made workflows a client can offer as templates or slash commands. Those that can change data ask before they write.
+
+<!-- BEGIN GENERATED: capabilities-prompts -->
+<!-- Generated from dist/src/prompts/index.js by `npm run docs:gen`. Do not edit. -->
+| Prompt | Parameters | Description |
+|--------|------------|-------------|
+| `monthly_review` | `month` (optional) | Review a month: budget versus actual per category, overspent and unused categories, income versus expenses, and suggestions. |
+| `spending_check` | `date` (optional) | Quick check on a month so far: on track or overspending, categories to watch, and what is left to spend. |
+| `spending_patterns` | `end_month` (optional), `months` (optional) | Spending trends over the last N full months: direction, biggest category changes, savings rate trend, unusual items. |
+| `budget_cleanup` | `date` (optional) | Read-only review of payees, rules, categories and accounts for duplicates and unused items; proposes changes and asks before writing. |
+| `categorize_uncategorized` | `since` (optional) | Find uncategorised transactions, propose categories from payee history, confirm, apply in one batch, and offer rules for repeat payees. |
+| `subscription_finder` | `date` (optional) | Find recurring charges from 12 months of payee history, compare them with your schedules, and offer a schedule for an unscheduled one only after you say yes. |
+
+A prompt appears only when every tool it names is offered. With `MCP_READ_ONLY=true`, `categorize_uncategorized` is hidden, because it names a tool that can write.
+<!-- END GENERATED: capabilities-prompts -->
+
+## Resources
+
+None yet: the server offers tools and prompts only.
 
 ## Configuration
 
@@ -143,7 +265,7 @@ A configuration that resolves to zero tools refuses to start. See [Security and 
 | `MCP_TOOLSETS` | No | Toolset groups and presets to publish; see [Reducing the tool surface](#reducing-the-tool-surface) |
 <!-- env-summary:end -->
 
-Every variable, with its type and default: [configuration reference](docs/reference/configuration.md). Several budgets: [multiple budgets](docs/guides/multiple-budgets.md). Auth modes, per-client tokens and OIDC: [authentication](docs/guides/authentication.md).
+Every variable, with its type and default: [configuration reference](docs/reference/configuration.md). OIDC users can opt into [discovery of shared budgets](docs/guides/multiple-budgets.md#discover-shared-budgets). Several budgets: [multiple budgets](docs/guides/multiple-budgets.md). Auth modes, per-client tokens and OIDC: [authentication](docs/guides/authentication.md).
 
 ## Documentation
 
@@ -169,4 +291,4 @@ MIT, see [LICENSE](LICENSE). Built on [Actual Budget](https://actualbudget.org/)
 
 ---
 
-**Version:** 0.27.1 | **Tool Count:** 85 (verified LibreChat-compatible)
+**Version:** 0.36.1 | **Tool Count:** 85 (verified LibreChat-compatible)

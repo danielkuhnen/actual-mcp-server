@@ -1,20 +1,27 @@
 import { z } from 'zod';
 import type { ToolDefinition } from '../../types/tool.d.js';
 import adapter from '../lib/actual-adapter.js';
+import { CommonSchemas } from '../lib/schemas/common.js';
+import { expandSplitsForSearch } from '../lib/split-search.js';
+import { idSetByName } from '../lib/actual-adapter/filter-ids.js';
+import { refuseOffBudgetAccount } from '../lib/search-account-guard.js';
 
 const InputSchema = z.object({
-  categoryName: z.string().optional().describe('Name of the category to search for (e.g., "Food", "Rent", "Transportation") - optional for smoke tests'),
-  startDate: z.string().optional().describe('Optional: Start date in YYYY-MM-DD format'),
-  endDate: z.string().optional().describe('Optional: End date in YYYY-MM-DD format'),
-  accountId: z.string().optional().describe('Optional: Filter by specific account ID'),
-  minAmount: z.number().optional().describe('Optional: Minimum amount in cents (use negative for expenses)'),
-  maxAmount: z.number().optional().describe('Optional: Maximum amount in cents'),
-  limit: z.number().optional().default(100).describe('Optional: Maximum number of transactions to return (default: 100)'),
+  categoryName: z.string().optional().describe('Name of the category to search for (e.g., "Food", "Rent", "Transportation")'),
+  startDate: CommonSchemas.date.optional().describe('Start date in YYYY-MM-DD format'),
+  endDate: CommonSchemas.date.optional().describe('End date in YYYY-MM-DD format'),
+  accountId: z.string().optional().describe('Filter by specific account ID'),
+  minAmount: z.number().optional().describe('Minimum amount in cents (use negative for expenses)'),
+  maxAmount: z.number().optional().describe('Maximum amount in cents'),
+  limit: z.number().optional().default(100).describe('Maximum number of transactions to return'),
 });
 
 const tool: ToolDefinition = {
   name: 'actual_transactions_search_by_category',
-  description: 'Search transactions by category name. Returns all transactions in a specific category with optional date range, account, and amount filters. Perfect for analyzing spending in budget categories.',
+  description:
+    'Search transactions by category name (case-insensitive exact match, e.g. "Groceries"), optionally narrowed by a YYYY-MM-DD date range, accountId and an amount range in integer cents. Read-only; off-budget accounts are excluded, and an off-budget accountId is refused. ' +
+    'Returns up to limit rows (default 100), newest first, as { transactions, count, totalAmount, hasMore, categoryName }, each row with accountName; count and totalAmount cover only the returned rows, hasMore is true when more rows matched. With categoryName, a split is matched by its children; rows carry parent_id. ' +
+    'An unknown category name returns an empty list with an error field. With a category id use actual_transactions_filter; for per-category totals use actual_transactions_aggregate.',
   inputSchema: InputSchema,
   call: async (args: unknown, _meta?: unknown) => {
     const input = InputSchema.parse(args || {});
@@ -29,26 +36,28 @@ const tool: ToolDefinition = {
     // tool already paid for.
     if (input.accountId) {
       await adapter.resolveFilterId('account', input.accountId, { verifyExists: true, rows: allAccounts });
+      // #756: an explicit off-budget account is refused, not answered with an empty list.
+      refuseOffBudgetAccount(allAccounts, input.accountId);
     }
 
     // Step 1: Find category ID by name
-    let categoryId: string | undefined;
+    let categoryIds: Set<string> | undefined;
     if (input.categoryName) {
       const categories = await adapter.getCategories();
-      const category = categories.find((c: any) => 
-        c.name && c.name.toLowerCase() === input.categoryName!.toLowerCase()
-      );
-      if (!category) {
+      // #802: every category carrying the name (the same name can sit in two groups).
+      const matched = idSetByName(categories, input.categoryName);
+      if (matched.size === 0) {
         // Category not found - return empty result
         return {
           transactions: [],
           count: 0,
           totalAmount: 0,
+          hasMore: false,
           categoryName: input.categoryName,
           error: `Category "${input.categoryName}" not found`,
         };
       }
-      categoryId = category.id;
+      categoryIds = matched;
     }
     
     // Step 2: Get base transactions (filtered by account and date range if provided)
@@ -91,6 +100,7 @@ const tool: ToolDefinition = {
         transactions: [],
         count: 0,
         totalAmount: 0,
+        hasMore: false,
         categoryName: input.categoryName,
       };
     }
@@ -98,9 +108,10 @@ const tool: ToolDefinition = {
     // Step 3: Apply JavaScript filters
     let filtered = allTransactions;
     
-    // Filter by category ID
-    if (categoryId) {
-      filtered = filtered.filter((t: any) => t.category === categoryId);
+    // Filter by category ID. #750: a split parent has a null category, so search its children.
+    if (categoryIds) {
+      filtered = expandSplitsForSearch(filtered).rows;
+      filtered = filtered.filter((t: any) => categoryIds.has(t.category));
     }
     
     // Filter by amount range
@@ -118,7 +129,9 @@ const tool: ToolDefinition = {
       return dateB.localeCompare(dateA);
     });
     
+    // #755: computed against the slice, so it agrees with the rows returned even for a negative limit.
     const limited = filtered.slice(0, input.limit || 100);
+    const hasMore = filtered.length > limited.length;
     
     // Enrich transactions with account names (reuse already-fetched allAccounts)
     const accountMap = new Map(allAccounts.map((acc: any) => [acc.id, acc.name]));
@@ -135,6 +148,7 @@ const tool: ToolDefinition = {
       transactions: enrichedTransactions,
       count: enrichedTransactions.length,
       totalAmount,
+      hasMore,
       categoryName: input.categoryName,
     };
   },

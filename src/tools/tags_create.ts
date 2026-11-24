@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { createTool } from '../lib/toolFactory.js';
+import { CommonSchemas } from '../lib/schemas/common.js';
 import adapter from '../lib/actual-adapter.js';
 
 export default createTool({
@@ -7,13 +8,12 @@ export default createTool({
   description:
     'Create a new tag in Actual Budget. The "tag" field is the raw word WITHOUT a leading "#" character ' +
     '(e.g. use "groceries", not "#groceries"). ' +
-    'IMPORTANT: this operation is an upsert on the tag word. If a tag with the same name already exists ' +
-    '(including previously deleted ones), the existing tag is updated and its id is returned. ' +
-    'Creating the same tag name twice always returns the same id. ' +
-    'Color convention is CSS hex (e.g. "#33aa33") but no format is enforced by the API.',
+    'This is an upsert on the tag word: an existing tag returns its id and keeps the color and description ' +
+    'not supplied; a deleted name is revived with only the supplied fields. ' +
+    'A name with "#" or whitespace, or a color that is not 6 digit hex, is refused.',
   schema: z.object({
-    tag: z.string().min(1, 'tag must not be empty').describe('Tag word without "#" prefix (e.g. "groceries")'),
-    color: z.string().optional().describe('Optional color string (convention: CSS hex like "#33aa33")'),
+    tag: CommonSchemas.tagName,
+    color: CommonSchemas.tagColor.optional(),
     description: z.string().optional().describe('Optional description of the tag'),
   }),
   handler: async (input) => {

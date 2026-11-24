@@ -49,7 +49,22 @@ There is no `lint` or `format` script. If `test:adapter` or `test:unit-js` compl
 
 ## Adding or changing a tool
 
-Follow [docs/development/new-tool-checklist.md](docs/development/new-tool-checklist.md) end to end. New tools use `createTool()` from `src/lib/toolFactory.ts`, are named `actual_<domain>_<action>`, take ids from `CommonSchemas` (`src/lib/schemas/common.ts`), and are added to `IMPLEMENTED_TOOLS` and `src/tools/index.ts`. Path-scoped conventions live in [.github/instructions/](.github/instructions/).
+Follow [docs/development/new-tool-checklist.md](docs/development/new-tool-checklist.md) end to end. New tools use `createTool()` from `src/lib/toolFactory.ts`, are named `actual_<domain>_<action>` in lower snake_case (never camelCase), take ids from `CommonSchemas` (`src/lib/schemas/common.ts`), and are added to `IMPLEMENTED_TOOLS` and `src/tools/index.ts`. Path-scoped conventions live in [.github/instructions/](.github/instructions/).
+
+## Docs to update with a change
+
+| Change | Update |
+|--------|--------|
+| New or changed tool | [new-tool-checklist](docs/development/new-tool-checklist.md) (it lists every doc) |
+| New or changed config variable | [.env.example](.env.example) and [configuration](docs/reference/configuration.md) |
+| Authentication, authorisation or another security behaviour | [security-and-privacy](docs/explanation/security-and-privacy.md), [authentication](docs/guides/authentication.md) |
+| Budget selection or multi-budget behaviour | [multiple-budgets](docs/guides/multiple-budgets.md) |
+| Transport or client connection | the client page listed in [clients](docs/guides/clients/README.md) and its example config |
+| Docker, compose or deployment | [deployment](docs/guides/deployment.md), [architecture](docs/explanation/architecture.md) |
+| User-facing feature or behaviour change | [README](README.md) when it changes what the README says; [upgrading](docs/guides/upgrading.md) when an operator must act |
+| New test file | the test-file tables in [testing-and-reliability](docs/development/testing-and-reliability.md) |
+
+A change that alters behaviour described in a doc updates that doc in the same pull request; run `npm run docs:check` after.
 
 ## Tests
 
@@ -57,6 +72,11 @@ Follow [docs/development/new-tool-checklist.md](docs/development/new-tool-checkl
 - **E2E** coverage of the tool surface goes in `tests/e2e/docker-all-tools.e2e.spec.ts`, written against the provisioning fixtures in `tests/e2e/fixtures.ts`. It runs over HTTP and stdio. A new spec file is not collected unless a Playwright project matches it.
 - **Integration** modules live in `tests/manual/tests/` and need a live server.
 - **`npm run test:mcp-client`** starts the HTTP server and drives it as an MCP client. Past `initialize` it needs a live Actual server (a real `.env`), and `MCP_BRIDGE_PORT` (default 3600) must be free: another listener on that port answers instead.
+- **What a review of a change's tests checks** (people and review bots alike; decided 2026-11-21):
+  - A change under `src/` that alters behaviour carries a test change in the same pull request. A refactor with no behaviour change says so in its description.
+  - Every new refusal or validation error has a negative test that asserts the message, not only that something was thrown.
+  - A change to a tool's contract (inputs, outputs, refusals) carries a row in `tests/e2e/docker-all-tools.e2e.spec.ts` with its negative and its cleanup, for the compact tool and for the legacy tool it maps to.
+  - A test must be able to fail: it asserts on the result of running the changed code, and a guard that only reads source text is not the sole cover for a behaviour change.
 - Include a negative case for every positive one. Details: [docs/development/testing-and-reliability.md](docs/development/testing-and-reliability.md) and [tests/e2e/README.md](tests/e2e/README.md).
 
 ## Contributing a change

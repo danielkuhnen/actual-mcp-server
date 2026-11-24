@@ -16,12 +16,18 @@ console.log('Running schema validation (negative-path) tests');
 
 // ─── helpers ───────────────────────────────────────────────────────────────
 
-function expectParseError(tool, input, label) {
+// `messagePattern` (optional): the refusal must also say the right thing, so a rejection for an
+// unrelated reason cannot pass for the one under test.
+function expectParseError(tool, input, label, messagePattern) {
   try {
     tool.inputSchema.parse(input);
     console.error(`  FAIL (expected Zod error) [${label}]`);
     return false;
-  } catch (_e) {
+  } catch (e) {
+    if (messagePattern && !messagePattern.test(String(e?.message))) {
+      console.error(`  FAIL (rejected for the wrong reason) [${label}]: ${e?.message}`);
+      return false;
+    }
     console.log(`  ✓ correctly rejected [${label}]`);
     return true;
   }
@@ -81,7 +87,7 @@ async function expectCallError(tool, input, label) {
     import('../../dist/src/tools/rules_create_batch.js').then(m => m.default),
     import('../../dist/src/tools/budget_updates_batch.js').then(m => m.default),
     import('../../dist/src/tools/budgets_transfer.js').then(m => m.default),
-    import('../../dist/src/tools/budgets_setAmount.js').then(m => m.default),
+    import('../../dist/src/tools/budgets_set_amount.js').then(m => m.default),
     import('../../dist/src/tools/schedules_create.js').then(m => m.default),
     import('../../dist/src/tools/schedules_update.js').then(m => m.default),
     import('../../dist/src/tools/schedules_delete.js').then(m => m.default),
@@ -194,8 +200,8 @@ async function expectCallError(tool, input, label) {
     { month: '2026-03', fromCategoryId: '10000000-0000-4000-8000-000000000001', toCategoryId: '10000000-0000-4000-8000-000000000001', amount: 100 },
     'same from/to category must be rejected at runtime')) fail();
 
-  // ── actual_budgets_setAmount ────────────────────────────────────────────
-  console.log('\n[actual_budgets_setAmount]');
+  // ── actual_budgets_set_amount ────────────────────────────────────────────
+  console.log('\n[actual_budgets_set_amount]');
 
   if (!expectParseError(setAmount, {}, 'empty input — all fields required')) fail();
   if (!expectParseError(setAmount,
@@ -383,6 +389,16 @@ async function expectCallError(tool, input, label) {
   if (!expectParseOk(accounts_create_tool,
     { name: 'Savings', balance: 10000 },
     'valid name + integer balance accepted')) fail();
+  // #767: offbudget is accepted AND kept (it used to be stripped silently, creating an on-budget account).
+  if (accounts_create_tool.inputSchema.parse({ name: 'Mortgage', offbudget: true }).offbudget !== true) {
+    console.log('  \u2717 accounts_create keeps offbudget: true in the parsed input (#767)');
+    fail();
+  } else {
+    console.log('  \u2713 accounts_create keeps offbudget: true in the parsed input (#767)');
+  }
+  if (!expectParseError(accounts_create_tool,
+    { name: 'Mortgage', offbudget: 'yes' },
+    'non-boolean offbudget rejected (#767)', /offbudget[\s\S]*boolean/i)) fail();
   // #380: `id` was REMOVED, not tightened, because upstream's api/account-create drops it
   // and mints its own UUID. Pinned so a future "add an optional id back" reintroduces the
   // success-lie (caller's id accepted, different id created) and this goes red first.
@@ -597,6 +613,32 @@ async function expectCallError(tool, input, label) {
     if (!expectParseOk(txn_update_tool,
       { id: '50000000-0000-4000-8000-000000000001', fields: { notes: 'x' } },
       'valid id + fields accepted')) fail();
+  }
+
+  // #746: transfer_id is not an update field. `transfer_id: null` on a transfer side wrote a second
+  // mirror row upstream (duplicated money, reported as success). The legacy `fields` object is
+  // strict, so the key is refused with the text a client sees, and so is any other unknown key
+  // (it used to be stripped silently, which would have turned the refusal into a no-op success).
+  console.log('\n[actual_transactions_update: #746 transfer_id and unknown keys refused]');
+  {
+    const { formatZodError } = await import('../../dist/src/lib/zod-error-format.js');
+    const txn_update_tool = await import('../../dist/src/tools/transactions_update.js').then(m => m.default);
+    const id = '50000000-0000-4000-8000-000000000001';
+    const shown = (input) => {
+      try { txn_update_tool.inputSchema.parse(input); return null; } catch (e) { return formatZodError(e, txn_update_tool.inputSchema); }
+    };
+    for (const [label, input, key] of [
+      ['transfer_id null', { id, fields: { transfer_id: null } }, 'transfer_id'],
+      ['transfer_id string', { id, fields: { transfer_id: id, notes: 'x' } }, 'transfer_id'],
+      ['an unknown key', { id, fields: { bogus: 1, notes: 'x' } }, 'bogus'],
+    ]) {
+      const text = shown(input);
+      if (!text || !text.includes(`unexpected field(s): ${key}`)) { console.error(`  FAIL [#746 ${label}]: ${text}`); fail(); }
+      else console.log(`  ✓ [#746 ${label}] refused: ${text}`);
+    }
+    if (!expectParseOk(txn_update_tool,
+      { id, fields: { account: id, date: '2026-01-01', amount: 1, payee: null, payee_name: 'x', imported_payee: 'x', category: null, notes: 'x', imported_id: 'x', cleared: true, reconciled: false, subtransactions: [{ amount: 1 }] } },
+      '#746: the twelve remaining keys are still accepted (account, date and amount cannot be null since #814)')) fail();
   }
 
   const uncategorized_tool = await import('../../dist/src/tools/transactions_uncategorized.js').then(m => m.default);

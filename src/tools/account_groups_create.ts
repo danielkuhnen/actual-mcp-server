@@ -8,21 +8,17 @@ export default createTool({
   description:
     'Create a custom account group for organising accounts in the sidebar. ' +
     'Returns the id of the new group. Assigning accounts to it is a separate step: ' +
-    'set the account\'s account_group_id with actual_accounts_update. ' +
+    'assign an account with actual_accounts_update account_group_id. ' +
     'Requires an Actual server on 26.9.0 or newer.',
   schema: z.object({
     name: z.string().min(1).describe('Display name for the group, for example "Savings" or "Joint accounts"'),
-    sort_order: z
-      .number()
-      .optional()
-      .describe('Optional ordering position in the sidebar. Lower sorts first; omit to let Actual place it.'),
   }),
   handler: async (input) => {
-    const id = await adapter.createAccountGroup(input);
+    const id = await adapter.createAccountGroup({ name: input.name });
     return { id, name: input.name };
   },
   examples: [
     { description: 'Create a group for savings accounts', input: { name: 'Savings' } },
-    { description: 'Create a group pinned to the top of the sidebar', input: { name: 'Daily spending', sort_order: 0 } },
+    { description: 'Create a group for everyday accounts', input: { name: 'Daily spending' } },
   ],
 });

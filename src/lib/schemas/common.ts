@@ -7,6 +7,8 @@
  */
 
 import { z } from 'zod';
+import { isCalendarDay } from '../dates.js';
+import { MAX_BUDGET_AMOUNT_CENTS } from '../budget-limits.js';
 import { 
   MAX_NAME_LENGTH, 
   MAX_NOTES_LENGTH, 
@@ -92,6 +94,33 @@ export const tagIdSchema = z
   .describe('Tag UUID');
 
 /**
+ * Tag name (#699). A tag is the `#word` written in a transaction's notes, and upstream
+ * extracts it with `/(?<!#)#([^#\s]+)/g`, so a name holding "#" or whitespace can never
+ * match a note. The pattern is the one upstream's own rename uses (`/^[^#\s]+$/`). No
+ * trimming: " a " is refused, not silently rewritten. Applied on create and on the NEW
+ * name of an update only, never on a lookup by id, so a bad row that already exists can
+ * still be renamed and deleted.
+ */
+export const TAG_NAME_PATTERN = /^[^#\s]+$/;
+export const tagNameSchema = z
+  .string()
+  .regex(TAG_NAME_PATTERN, 'tag must be one word: no "#" and no whitespace')
+  .describe('Tag word, no "#", no spaces');
+
+/**
+ * Tag colour (#699): "#" plus exactly six hex digits. The upstream API stores any string, but
+ * the Actual UI accepts only this form (TagCreationRow.tsx tests /^#[0-9a-fA-F]{6}$/ and the
+ * tag editor writes the picker's hex string), so anything else is a colour the UI itself could
+ * never have produced. On create, "no colour" is expressed by omitting the field; on update an
+ * omitted colour keeps the stored one, and no tool can clear a colour (not supported).
+ */
+export const TAG_COLOR_PATTERN = /^#[0-9a-fA-F]{6}$/;
+export const tagColorSchema = z
+  .string()
+  .regex(TAG_COLOR_PATTERN, 'color must be a 6 digit hex colour such as "#33aa33"')
+  .describe('6 digit hex, e.g. "#33aa33"');
+
+/**
  * Schedule UUID validation
  * Used for: schedule management operations (update, delete)
  *
@@ -109,14 +138,29 @@ export const scheduleIdSchema = z
 // ============================================================================
 
 /**
- * Date in YYYY-MM-DD format
+ * A real calendar day in YYYY-MM-DD format (2018-02-30 is refused, #745). The published JSON
+ * pattern stays shape-only: it cannot express leap years, and Zod being stricter is the safe direction.
  * Used for: transactions, account balance queries, date range filters
  * Example: "2025-11-24"
  */
 export const dateSchema = z
   .string()
-  .regex(DATE_PATTERN, 'Invalid date format (expected YYYY-MM-DD)')
+  // abort: true stops at a bad shape, so a malformed string yields the shape message only (Zod 4
+  // runs a refine after a failed regex otherwise).
+  .regex(DATE_PATTERN, { message: 'Invalid date format (expected YYYY-MM-DD)', abort: true })
+  .refine(isCalendarDay, 'Invalid date (not a real calendar day)')
   .describe('Date in YYYY-MM-DD format');
+
+/**
+ * The one-off branch of a schedule `date` union (#745). dateSchema aborts on a bad shape, and Zod 4
+ * then counts the whole branch as aborted, so a union of it and the recurrence object would answer
+ * a malformed string with a bare "Invalid input". This variant does not abort: the calendar refine
+ * skips a malformed shape, so exactly one issue (shape or calendar) surfaces from the one branch.
+ */
+export const oneOffDateSchema = z
+  .string()
+  .regex(DATE_PATTERN, 'Invalid date format (expected YYYY-MM-DD)')
+  .refine((v) => !DATE_PATTERN.test(v) || isCalendarDay(v), 'Invalid date (not a real calendar day)');
 
 /**
  * Month in YYYY-MM format
@@ -141,6 +185,17 @@ export const amountCentsSchema = z
   .number()
   .int('Amount must be an integer (cents)')
   .describe('Amount in cents (negative for expenses, positive for income)');
+
+/**
+ * A budget amount in cents (#759): `amountCents` bounded to what Actual can store.
+ * Upstream `safeNumber` allows only 2 ** 51 - 1, well under the `.int()` bound of 2 ** 53 - 1.
+ */
+export const budgetAmountCentsSchema = z
+  .number()
+  .int('Amount must be an integer (cents)')
+  .min(-MAX_BUDGET_AMOUNT_CENTS, `amount must be at least -${MAX_BUDGET_AMOUNT_CENTS} (the limit Actual can store)`)
+  .max(MAX_BUDGET_AMOUNT_CENTS, `amount must be at most ${MAX_BUDGET_AMOUNT_CENTS} (the limit Actual can store)`)
+  .describe('Budget amount in cents, at most 2251799813685247 either way');
 
 /**
  * Optional amount in cents
@@ -272,6 +327,8 @@ export const CommonSchemas = {
   ruleId: ruleIdSchema,
   accountGroupId: accountGroupIdSchema,
   tagId: tagIdSchema,
+  tagName: tagNameSchema,
+  tagColor: tagColorSchema,
   scheduleId: scheduleIdSchema,
 
   // Dates
@@ -280,6 +337,7 @@ export const CommonSchemas = {
   
   // Amounts
   amountCents: amountCentsSchema,
+  budgetAmountCents: budgetAmountCentsSchema,
   optionalAmountCents: optionalAmountCentsSchema,
   
   // Text fields
@@ -315,3 +373,52 @@ export const CommonSchemas = {
  * });
  * ```
  */
+
+/**
+ * The keys an import row may carry (#749): the nine documented ones, `account` (upstream overwrites
+ * it with the target account id), and the three pass-through keys (#217). The legacy
+ * actual_transactions_import row schema and the compact manage_transactions import check both
+ * close on this one list, so a typo or an internal column is refused by name before any adapter call.
+ */
+export const TX_IMPORT_ROW_KEYS = [
+  'date',
+  'amount',
+  'payee',
+  'payee_name',
+  'imported_payee',
+  'category',
+  'notes',
+  'cleared',
+  'imported_id',
+  'account',
+  'subtransactions',
+  'transfer_id',
+  'reconciled',
+] as const;
+
+/**
+ * The keys of a transaction that are NOT NULL upstream (#814). Create requires them; update and
+ * update_batch accept a new value or no key at all, never null: upstream's conform() throws
+ * `"amount" is required for table "transactions"` with the row JSON. The compact update check and
+ * the unit tests iterate this one list.
+ */
+export const TX_UPDATE_NOT_NULL_KEYS = ['account', 'date', 'amount'] as const;
+
+/** The refusal for an update that changes nothing (#815). One text for the compact and legacy tools. */
+export const TX_UPDATE_NEEDS_A_FIELD = 'update needs at least one field to change besides id';
+
+/**
+ * True when some key other than `except` holds a value that is not undefined (#815). A key set to
+ * null counts as a change (null clears payee, category and notes); an undefined-only object does
+ * not. Pass `except = ''` for a `fields` object, which has no id.
+ */
+export const hasFieldToChange = (v: Record<string, unknown>, except = 'id'): boolean =>
+  Object.entries(v).some(([key, val]) => key !== except && val !== undefined);
+
+/**
+ * The keys a split child in an import row may carry (#749). Upstream's makeChild spreads the child
+ * over a default (so `amount` defaults to 0) and reads `category` and `payee` from it; `notes` is a
+ * column. Any other key reaches the database layer and throws `Field "x" does not exist`, so the
+ * legacy child schema and the compact import check close on this one list.
+ */
+export const TX_IMPORT_CHILD_KEYS = ['amount', 'category', 'notes', 'payee'] as const;

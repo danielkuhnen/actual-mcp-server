@@ -1,0 +1,236 @@
+// tests/unit/prompt_registry.test.js
+//
+// #660: the pure prompt registry functions and validators, fed bad fixtures so each guard can
+// fail, plus the offer matrix driven through the REAL tool policy (actualToolsManager).
+//
+// Run: node tests/unit/prompt_registry.test.js   (needs `npm run build` first)
+
+import assert from 'assert';
+
+process.env.ACTUAL_SERVER_URL ??= 'http://127.0.0.1:5999';
+process.env.ACTUAL_PASSWORD ??= 'dummy';
+process.env.ACTUAL_BUDGET_SYNC_ID ??= '00000000-0000-0000-0000-000000000000';
+for (const k of ['MCP_TOOLSETS', 'MCP_TOOLS', 'MCP_READ_ONLY', 'MCP_TOOL_SURFACE']) delete process.env[k];
+
+let passed = 0;
+let failed = 0;
+async function check(label, fn) {
+  try { await fn(); console.log(`  ok: ${label}`); passed++; }
+  catch (err) { console.error(`  FAIL: ${label} -> ${err.message}`); failed++; }
+}
+console.log('\n[prompt-registry]');
+
+const { z, ZodError } = await import('zod');
+const {
+  resolveOfferedPrompts, renderPrompt, assertPromptNames, assertRequiredToolsKnown, assertArgsBounded, assertArgumentTitles,
+} = await import('../../dist/src/prompts/registry.js');
+const { PROMPT_DEFINITIONS } = await import('../../dist/src/prompts/index.js');
+const { COMPACT_TOOLS } = await import('../../dist/src/compact/registry.js');
+const manager = (await import('../../dist/src/actualToolsManager.js')).default;
+
+const def = (over = {}) => ({
+  name: 'monthly_review',
+  title: 'Monthly review',
+  description: 'd',
+  arguments: [{ name: 'month', description: 'YYYY-MM', required: true }],
+  requiredTools: ['get_context'],
+  argsSchema: z.strictObject({ month: z.string().regex(/^\d{4}-\d{2}$/) }),
+  render: (a) => `Review ${a.month}`,
+  ...over,
+});
+
+// ---------------------------------------------------------------- resolveOfferedPrompts
+await check('a prompt is offered when every required tool is published', () => {
+  const out = resolveOfferedPrompts([def({ requiredTools: ['a', 'b'] })], new Set(['a', 'b', 'c']));
+  assert.deepStrictEqual(out.map((d) => d.name), ['monthly_review']);
+});
+await check('a prompt is dropped when one required tool is missing', () => {
+  assert.deepStrictEqual(resolveOfferedPrompts([def({ requiredTools: ['a', 'b'] })], new Set(['a'])), []);
+});
+await check('registry order is kept', () => {
+  const out = resolveOfferedPrompts([def({ name: 'b_one', requiredTools: [] }), def({ name: 'a_two', requiredTools: [] })], new Set());
+  assert.deepStrictEqual(out.map((d) => d.name), ['b_one', 'a_two']);
+});
+
+// ---------------------------------------------------------------- surface matrix (real policy)
+const C = def({ name: 'compact_prompt', requiredTools: ['get_context', 'manage_transactions'] });
+const L = def({ name: 'legacy_prompt', requiredTools: ['actual_accounts_list'] });
+async function offeredFor(settings) {
+  await manager.initialize({ toolsets: 'all', tools: '', readOnly: false, ...settings }, COMPACT_TOOLS);
+  return resolveOfferedPrompts([C, L], new Set(manager.getPublishedToolNames())).map((d) => d.name);
+}
+await check('surface matrix: legacy offers only the legacy prompt', async () => {
+  assert.deepStrictEqual(await offeredFor({ surface: 'legacy' }), ['legacy_prompt']);
+});
+await check('surface matrix: compact offers only the compact prompt', async () => {
+  assert.deepStrictEqual(await offeredFor({ surface: 'compact' }), ['compact_prompt']);
+});
+await check('surface matrix: all offers both', async () => {
+  assert.deepStrictEqual(await offeredFor({ surface: 'all' }), ['compact_prompt', 'legacy_prompt']);
+});
+await check('surface matrix: compact read-only offers neither (manage_transactions is hidden whole)', async () => {
+  assert.deepStrictEqual(await offeredFor({ surface: 'compact', readOnly: true }), []);
+});
+
+await check('published vs unpublished set: the manage_* prompt is absent under compact read-only and present under compact', async () => {
+  await manager.initialize({ toolsets: 'all', tools: '', readOnly: true, surface: 'compact' }, COMPACT_TOOLS);
+  const published = new Set(manager.getPublishedToolNames());
+  assert.ok(!published.has('manage_transactions'));
+  assert.deepStrictEqual(resolveOfferedPrompts([C], published), []);
+  await manager.initialize({ toolsets: 'all', tools: '', readOnly: false, surface: 'compact' }, COMPACT_TOOLS);
+  assert.deepStrictEqual(resolveOfferedPrompts([C], new Set(manager.getPublishedToolNames())).map((d) => d.name), ['compact_prompt']);
+});
+
+// ---------------------------------------------------------------- assertPromptNames
+await check('assertPromptNames accepts a snake_case name', () => {
+  assertPromptNames([def()]);
+});
+await check('assertPromptNames rejects camelCase', () => {
+  assert.throws(() => assertPromptNames([def({ name: 'showLargeTransactions' })]), /showLargeTransactions/);
+});
+await check('assertPromptNames rejects kebab-case', () => {
+  assert.throws(() => assertPromptNames([def({ name: 'spending-check' })]), /spending-check/);
+});
+await check('assertPromptNames rejects a duplicate', () => {
+  assert.throws(() => assertPromptNames([def(), def()]), /Duplicate prompt name "monthly_review"/);
+});
+await check('the real PROMPT_DEFINITIONS pass every validator', async () => {
+  await manager.initialize({ toolsets: 'all', tools: '', readOnly: false, surface: 'all' }, COMPACT_TOOLS);
+  const known = new Set([...manager.getToolNames(), ...manager.getCompactToolNames()]);
+  assertPromptNames(PROMPT_DEFINITIONS);
+  assertRequiredToolsKnown(PROMPT_DEFINITIONS, known);
+  assertArgsBounded(PROMPT_DEFINITIONS);
+  assertArgumentTitles(PROMPT_DEFINITIONS);
+});
+
+// ---------------------------------------------------------------- assertRequiredToolsKnown
+await check('assertRequiredToolsKnown accepts known compact and legacy names', async () => {
+  await manager.initialize({ toolsets: 'all', tools: '', readOnly: false, surface: 'all' }, COMPACT_TOOLS);
+  const known = new Set([...manager.getToolNames(), ...manager.getCompactToolNames()]);
+  assert.ok(known.has('get_context') && known.has('actual_accounts_list'));
+  assertRequiredToolsKnown([def({ requiredTools: ['get_context', 'actual_accounts_list'] })], known);
+});
+await check('assertRequiredToolsKnown rejects an unknown tool, naming it', () => {
+  assert.throws(
+    () => assertRequiredToolsKnown([def({ requiredTools: ['no_such_tool'] })], new Set(['get_context'])),
+    /no_such_tool/,
+  );
+});
+
+// ---------------------------------------------------------------- assertArgsBounded
+await check('assertArgsBounded accepts max, regex, enum and number arguments', () => {
+  assertArgsBounded([def({ argsSchema: z.strictObject({
+    a: z.string().max(7),
+    b: z.string().regex(/^\d{4}-\d{2}$/),
+    c: z.enum(['x', 'y']).default('x'),
+    d: z.string().max(3).optional().default('abc'),
+    e: z.coerce.number().int().min(1).max(12),
+  }) })]);
+});
+await check('assertArgsBounded rejects an unbounded string, naming prompt and argument', () => {
+  assert.throws(
+    () => assertArgsBounded([def({ argsSchema: z.strictObject({ note: z.string() }) })]),
+    /monthly_review.*note/,
+  );
+});
+await check('assertArgsBounded rejects a union with an unbounded string option', () => {
+  assert.throws(() => assertArgsBounded([def({ argsSchema: z.strictObject({ f: z.union([z.string(), z.literal('all')]) }) })]), /unbounded/);
+});
+await check('assertArgsBounded rejects string.or(number)', () => {
+  assert.throws(() => assertArgsBounded([def({ argsSchema: z.strictObject({ f: z.string().or(z.number()) }) })]), /unbounded/);
+});
+await check('assertArgsBounded rejects a lazy string', () => {
+  assert.throws(() => assertArgsBounded([def({ argsSchema: z.strictObject({ f: z.lazy(() => z.string()) }) })]), /unbounded/);
+});
+await check('assertArgsBounded fails closed on an unrecognised node type', () => {
+  assert.throws(() => assertArgsBounded([def({ argsSchema: z.strictObject({ f: z.any() }) })]), /unbounded/);
+});
+await check('assertArgsBounded accepts a bounded string under a union and under default wrappers', () => {
+  assertArgsBounded([def({ argsSchema: z.strictObject({
+    a: z.string().regex(/^#[0-9a-f]{6}$/).max(7).default('#000000'),
+    b: z.union([z.string().max(5), z.literal('all')]),
+    c: z.string().max(5).nullable().optional(),
+    d: z.boolean().default(false),
+  }) })]);
+});
+await check('assertArgsBounded sees through optional, default and pipe wrappers', () => {
+  for (const f of [z.string().optional(), z.string().default('x'), z.string().transform((s) => s), z.array(z.string())]) {
+    assert.throws(() => assertArgsBounded([def({ argsSchema: z.strictObject({ f }) })]), /unbounded/);
+  }
+});
+
+// ---------------------------------------------------------------- renderPrompt
+await check('renderPrompt renders valid arguments', () => {
+  assert.strictEqual(renderPrompt(def(), { month: '2026-10' }), 'Review 2026-10');
+});
+await check('renderPrompt throws a ZodError on a missing required argument', () => {
+  assert.throws(() => renderPrompt(def(), undefined), ZodError);
+});
+await check('renderPrompt throws a ZodError on a malformed value and on an unknown key', () => {
+  assert.throws(() => renderPrompt(def(), { month: 'October' }), ZodError);
+  assert.throws(() => renderPrompt(def(), { month: '2026-10', extra: 'x' }), ZodError);
+});
+
+// ---------------------------------------------------------------- #772 normalisation
+const { normalizePromptArgs } = await import('../../dist/src/prompts/registry.js');
+await check('normalizePromptArgs drops blank strings, trims the rest, leaves non-strings and non-objects alone (#772)', () => {
+  assert.deepStrictEqual(normalizePromptArgs({ a: '', b: '  ', c: ' 3 ', d: 'x' }), { c: '3', d: 'x' });
+  assert.deepStrictEqual(normalizePromptArgs({ a: null, b: 5, c: { x: ' y ' } }), { a: null, b: 5, c: { x: ' y ' } });
+  assert.strictEqual(normalizePromptArgs('EVIL'), 'EVIL');
+  assert.strictEqual(normalizePromptArgs(null), null);
+  const arr = ['  '];
+  assert.strictEqual(normalizePromptArgs(arr), arr);
+  const input = { a: ' x ' };
+  normalizePromptArgs(input);
+  assert.strictEqual(input.a, ' x ', 'the caller object is not mutated');
+});
+await check('a blank value under an unknown key is refused, not ignored (#772)', () => {
+  assert.deepStrictEqual(normalizePromptArgs({ a: '', zz: '', yy: ' v ' }, new Set(['a'])), { zz: '', yy: ' v ' });
+  for (const d of PROMPT_DEFINITIONS) {
+    for (const v of ['', '   ']) assert.throws(() => renderPrompt(d, { montth_typo: v }), ZodError, d.name);
+  }
+});
+await check('a JSON.parse __proto__ key survives normalisation as an own key and is still refused (#772)', () => {
+  const hostile = JSON.parse('{"__proto__":{"a":1}}');
+  const out = normalizePromptArgs(hostile);
+  assert.ok(Object.prototype.hasOwnProperty.call(out, '__proto__'));
+  for (const d of PROMPT_DEFINITIONS) assert.throws(() => renderPrompt(d, hostile), ZodError, d.name);
+});
+await check('every real prompt renders an empty or blank value for every argument as omitted (#772)', () => {
+  for (const d of PROMPT_DEFINITIONS) {
+    const baseline = renderPrompt(d, {});
+    for (const a of d.arguments) {
+      for (const blank of ['', '   ', '\t\n']) {
+        assert.strictEqual(renderPrompt(d, { [a.name]: blank }), baseline, `${d.name}.${a.name} = ${JSON.stringify(blank)}`);
+      }
+    }
+  }
+});
+await check('non-string values are still refused, not defaulted (#772)', () => {
+  const d = PROMPT_DEFINITIONS.find((x) => x.name === 'monthly_review');
+  for (const v of [null, 5, {}, []]) assert.throws(() => renderPrompt(d, { month: v }), ZodError, JSON.stringify(v));
+  assert.throws(() => renderPrompt(d, 'EVIL'), ZodError);
+  assert.doesNotThrow(() => renderPrompt(d, null), 'arguments: null still means defaults');
+});
+
+// #774: render learns which keys were defaulted, from the NORMALISED input.
+await check('render receives the defaulted keys from the normalised input (#774)', () => {
+  const d = def({
+    arguments: [{ name: 'a', description: 'a', required: false }, { name: 'b', description: 'b', required: false }],
+    argsSchema: z.strictObject({ a: z.string().default('x'), b: z.string().default('y') }),
+    render: (_args, ctx) => [...ctx.defaulted].sort().join(','),
+  });
+  assert.strictEqual(renderPrompt(d, undefined), 'a,b');
+  assert.strictEqual(renderPrompt(d, null), 'a,b');
+  assert.strictEqual(renderPrompt(d, {}), 'a,b');
+  assert.strictEqual(renderPrompt(d, { a: 'given' }), 'b');
+  assert.strictEqual(renderPrompt(d, { a: 'given', b: 'given' }), '');
+  assert.strictEqual(renderPrompt(d, { a: '' }), 'a,b', 'a blank value counts as defaulted (#772)');
+  assert.strictEqual(renderPrompt(d, { a: '  ', b: 'q' }), 'a');
+});
+await check('a one-parameter render still works (#774)', () => {
+  assert.strictEqual(renderPrompt(def(), { month: '2026-10' }), 'Review 2026-10');
+});
+
+console.log(`\n[prompt-registry] Results: ${passed} passed, ${failed} failed`);
+process.exit(failed > 0 ? 1 : 0);

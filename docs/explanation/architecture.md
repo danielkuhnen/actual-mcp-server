@@ -19,6 +19,10 @@
 
 ---
 
+The dynamic OIDC ACL lists remote file metadata through the configured Actual
+service login. This path runs independently of the budget API singleton and its
+lock, so checking permissions preserves any budget another session has open.
+
 ## System Architecture
 
 ### High-Level Diagram
@@ -179,16 +183,16 @@ src/tools/
 ├── transfers_create.ts                  # Transfers
 ├── budgets_list_available.ts            # Budgets
 ├── budgets_switch.ts
-├── budgets_getMonth.ts
-├── budgets_getMonths.ts
+├── budgets_get_month.ts
+├── budgets_get_months.ts
 ├── budgets_get_all.ts
-├── budgets_setAmount.ts
+├── budgets_set_amount.ts
 ├── budgets_transfer.ts
-├── budgets_setCarryover.ts
-├── budgets_holdForNextMonth.ts
-├── budgets_resetHold.ts
+├── budgets_set_carryover.ts
+├── budgets_hold_for_next_month.ts
+├── budgets_reset_hold.ts
 ├── budgets_export.ts                    # #332: writes a zip to ACTUAL_EXPORT_DIR
-├── budgets_import.ts                    # #334: LOADS the imported budget (active budget changes)
+├── budgets_import.ts                    # #334: ADDS a budget file; the session stays on its own (#687)
 ├── budget_updates_batch.ts
 ├── preferences_get.ts                   # Preferences (#333)
 ├── categories_get.ts                   # Categories
@@ -248,6 +252,7 @@ src/tools/
    │
    ├──> tools/list → Returns available tools
    ├──> tools/call → Dispatches to ActualToolsManager
+   ├──> prompts/list, prompts/get → Served by registerPromptHandlers (#660)
    └──> Other MCP methods
    │
 4. ActualToolsManager validates and calls tool
@@ -374,10 +379,11 @@ actual-mcp-server/
 │   ├── types/                    # TypeScript type definitions
 │   │   └── tool.d.ts             # MCP tool types
 │   │
-│   ├── prompts/                  # MCP prompt templates
-│   │   └── showLargeTransactions.ts
+│   ├── prompts/                  # MCP prompt registry (#660)
+│   │   ├── registry.ts           # PromptDefinition, resolveOfferedPrompts, validators
+│   │   └── index.ts              # PROMPT_DEFINITIONS (one entry per prompt)
 │   │
-│   └── resources/                # MCP resources
+│   └── resources/                # Unshipped scaffolding: not registered, no resources capability
 │       └── accountsSummary.ts
 │
 ├── tests/                        # Tests
@@ -446,11 +452,11 @@ actual-mcp-server/
 5. Tool Registry Initialization
    └─> src/actualToolsManager.ts loads all tools
    └─> Validates tool schemas
-   └─> Registers 85 tools with MCP capabilities
+   └─> Registers 85 tools (15 published on the default compact surface)
 
 6. MCP Connection Setup
    └─> Create ActualMCPConnection instance
-   └─> Build capabilities object (tools, resources, prompts)
+   └─> Build capabilities object (tools, prompts, completions)
 
 7. Transport Server Startup
    └─┾ Start HTTP server
@@ -536,9 +542,14 @@ MCP_TRANSPORT_MODE=--http               # Only --http is supported
 MCP_TOOLSETS=all                        # groups and presets, e.g. chat
 MCP_TOOLS=                              # extra tools by full name
 MCP_READ_ONLY=false                     # true hides and refuses write-capable tools
+MCP_TOOL_SURFACE=compact                # compact (default) | legacy | all (#671, #680)
 ```
 
 `actualToolsManager.initialize()` resolves these once into a frozen policy (`src/lib/toolsets.ts`): the policy object, the published list and the settings are frozen, while the per-tool hide map is a `ReadonlyMap` by type only (`Object.freeze` does not reach Map contents). It holds, for every hidden tool, the setting that hid it (`MCP_READ_ONLY` first when both apply). `tools/list` on every path reads that list, and `callTool` refuses any tool not on the frozen published list with a `ToolUnavailableError` built from the stored reason, so altering the hide map cannot unhide a tool. Dispatch never reads the environment. A configuration that publishes zero tools fails startup.
+
+**Prompts (#660).** The server advertises the MCP `prompts` capability on both transports. `src/index.ts` resolves the offered list once, with `resolveOfferedPrompts(PROMPT_DEFINITIONS, new Set(getPublishedToolNames()))`, and passes it as the last parameter of `startHttpServer` and `startStdioServer`; both call the one helper `registerPromptHandlers` (`src/lib/promptHandlers.ts`), which serves `prompts/list`, `prompts/get` and `completion/complete` (#775, computed month and day values only, no budget access; the `completions` capability must be declared on every `Server` that registers it) over that list. A prompt is offered only when every tool in its `requiredTools` is in the published tool list, so the tool surface, `MCP_READ_ONLY`, `MCP_TOOLSETS` and `MCP_TOOLS` shrink the prompt list with the tools. The list is process-global and does not depend on the budget ACL. `prompts/get` for an unknown or hidden name is `-32602`, with the same message for both. The registry ships empty in #660; each prompt is added by its own ticket.
+
+**Compact layer (#671).** `src/compact/` holds a second, optional tool list: a compact tool is one published name with an action selector, and each action is a row naming a legacy tool (`types.ts`), a dispatcher that validates the chosen action's strict schema, renames and wraps the arguments and calls the legacy tool (`dispatch.ts`), and the registry of compact tools (`registry.ts`, 15 tools). The layer never imports the adapter or `@actual-app/api`: it reaches Actual only through `actualToolsManager.callOperation`, so every legacy rule (`withActualApi`, the write queue, no nested sessions) is inherited. `MCP_TOOL_SURFACE` picks the published list (`compact`, the default since #680, `legacy` or `all`). Under `compact` the legacy tools stay registered but are hidden, and `callOperation` skips only that hide: a tool hidden by `MCP_TOOLSETS` or `MCP_READ_ONLY` still refuses, naming that setting. `getToolNames()` and `getRegisteredToolCount()` remain legacy-only; `getCompactToolNames()` lists the rest. Each compact spec also carries docs-only `domain`, `summary` and `examplePrompt` fields (#668) that feed the generated README capabilities section and are never published in `tools/list`. The design record is `docs/explanation/compact-tool-surface.md`.
 
 #### Security
 
@@ -662,24 +673,33 @@ mcpServers:
 
 ### Error Flow
 
-```
-Tool Error
-  └─> Caught by tool implementation
-      └─> Adapter layer retry logic (3 attempts)
-          └─> If all retries fail → Error response
-              └─> ActualMCPConnection formats error
-                  └─> Transport sends JSON-RPC error
+Since #769 the two kinds of failure travel differently, and both transports share one helper (`executeToolCall` in `src/lib/tool-output.ts`):
 
-Error Response Format:
+```
+Tool Error (Zod validation, typed refusal, hidden tool, upstream failure)
+  └─> Adapter layer retry logic (3 attempts)
+      └─> If all retries fail → the error reaches executeToolCall
+          └─> Transport returns a tool RESULT, not a JSON-RPC error
+
+Tool failure result (a model can read it and retry):
 {
   "jsonrpc": "2.0",
   "id": 1,
-  "error": {
-    "code": -32000,
-    "message": "Tool execution failed: ..."
+  "result": {
+    "isError": true,
+    "content": [{ "type": "text", "text": "<error.message>" }]
   }
 }
+
+Protocol fault (unknown tool, malformed tools/call params):
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "error": { "code": -32602, "message": "Unknown tool: <name>" }
+}
 ```
+
+Only `error.message` is forwarded, never a stack, cause or data. A connection that failed to initialise gets the fixed startup-failure sentence on both transports (#438). A missing executor is a server wiring fault and stays `-32603`. The full table of changes is in [upgrading](../guides/upgrading.md).
 
 ### Retry Logic
 

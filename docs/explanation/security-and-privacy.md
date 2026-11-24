@@ -118,12 +118,14 @@ Known limitations:
   preference is re-checked against the live allow-list on every restore, so it grants
   nothing; it is not deleted from the preference file.
 
-**Behaviour change for OIDC (#572).** A session that has not switched and has no stored
+**Starting budget with discovery off (#572).** A session that has not switched and has no stored
 preference now starts on the first budget its allow-list permits, in registry order
 (default budget, then `BUDGET_1`, `BUDGET_2`, ...). Before, an OIDC principal whose list
 excluded the default budget got `Budget ACL:` on every call until it switched. Static and
 OIDC principals share this fallback; a wildcard principal still starts on the default
-budget.
+budget. With discovery on, the session restores a selectable preference, then tries a configured
+budget, then a sole permitted discovered file. Several discovered files require an explicit
+choice when there is no usable preference or configured budget.
 
 #### 2. **OIDC / JWT Authentication**
 
@@ -409,22 +411,12 @@ explicit binding costs no network call and keeps working while the IdP is down.
 - Every failure path denies. An unreachable server, an unparseable response, or an
   unmatched principal all return no budgets, never a wildcard.
 
-#### Known limitation: the dynamic ACL resolves via a budget download (#338)
+#### Dynamic ACL file listing
 
-When `AUTH_BUDGET_ACL_SOURCE=actual`, the ACL is resolved with `adapter.getBudgets()`.
-Every adapter session init calls `downloadBudget(ACTUAL_BUDGET_SYNC_ID)`, so resolving
-the ACL also downloads the configured DEFAULT budget, even though the ACL only needs
-the file list.
-
-This is not a correctness problem: a working, downloadable default budget is already
-required for the server to serve any tool at all, so it introduces no failure mode that
-did not already exist. It is an efficiency cost, bounded by the resolver's 60 second
-per-principal cache, so it is one download per principal per minute at worst.
-
-The clean fix is a narrow adapter entry point that lists budget files without
-downloading one. It was deliberately not built, because it means touching
-`src/lib/actual-adapter.ts` (the modify-with-caution tier, and the owner of the
-non-reentrant session lock) for a performance gain rather than a correctness one.
+Startup preflight and permission refresh list files directly on the configured Actual
+server using its service login. A lookup never opens a budget. Concurrent lookups
+share the in-flight request. The login token stays in memory for up to 60 seconds.
+Redirects are refused. A failed lookup denies access and the next request retries.
 
 #### Listings, import and error text under a restricted ACL (#570)
 
@@ -447,19 +439,48 @@ every other operation is. A `MCP_STATIC_TOKENS` principal (#572) is restricted t
 `budgets` the same way. Wildcard sessions, `MCP_SSE_AUTHORIZATION`,
 `MCP_ALLOW_UNAUTHENTICATED` and stdio are unrestricted and see every budget.
 
+#### Discovery of permitted files
+
+Use Actual Server 26.7.0 or newer for multi-user discovery. This includes
+the fixes in [26.6.0](https://github.com/advisories/GHSA-cq9c-6w48-qmfg)
+and [26.7.0](https://github.com/actualbudget/actual/security/advisories/GHSA-23vm-ffgg-qvjr).
+The service login must be able to see the files users share. Discovery carries
+only the authenticated user's permitted file metadata into their request.
+The existing access check still applies to every budget operation.
+
+Discovery widens what the identity match decides. Without it a matched user reaches
+only the Sync IDs an operator configured; with it the match also lists every file
+Actual shares with that `userName`. The identity warning above therefore applies in
+full: if users can edit the claim that is matched (`preferred_username` at many
+IdPs), pin `AUTH_BUDGET_ACL_CLAIM` to one they cannot change before enabling it.
+An encrypted shared file without a configured key appears as `locked: true`
+only for its grantees. It cannot be opened. A caller without the grant gets
+the same listing and switch refusal as for a missing file. An operator can add
+or complete a matching `BUDGET_n_*` entry with `BUDGET_n_ENCRYPTION_PASSWORD`.
+This lets every user Actual shares the file with read it through MCP, including
+anyone who was never given the encryption password.
+
+A saved Sync ID can restore a configured or discovered budget only while it is
+selectable under the current grants. A successful session open pins that choice. Revocation
+blocks further data calls on the pinned budget until the user switches.
+
 #### Known limitation: `actual_budgets_import` creates an un-ACL'd budget (#334)
 
 `actual_budgets_import` wraps `@actual-app/api`'s `importBudget()`, which does not
 merely read a file. Read from `importActual` and `cloud-storage` in the installed
-package: it closes the current budget, restores the archive into the local directory
-named by **the budget id the archive itself carries**, clears its cloud file and group
-ids, loads it, and uploads it as a new budget file. Three consequences follow, all
-accepted behaviour rather than defects:
+package: it closes the current budget, restores the archive into a **new** local
+directory (no local id is passed, so a fresh one is taken; a YNAB import derives its
+id from the budget name), clears its cloud file and group ids, loads it, and uploads
+it as a new budget file. This server then makes every session reload its own
+configured budget on its next call, so no session stays on the imported copy
+(verified live for #687). Three consequences follow, all accepted behaviour rather
+than defects:
 
-1. **It can OVERWRITE an existing budget's LOCAL copy.** Re-importing an export of
-   budget X replaces X's local data, which this process serves until X is next
-   downloaded. On the server it never overwrites another budget: the upload always
-   creates a new file (best effort; a failed upload leaves the budget local only).
+1. **It adds a budget and never overwrites one.** Re-importing an export of budget X
+   leaves X's local copy and X's server file untouched and adds another copy beside
+   them. The upload always creates a new server file (best effort; a failed upload
+   leaves the budget local only), and no tool here can remove it. To use the imported
+   budget, an operator adds its Sync ID to the server configuration and restarts.
 2. **A budget the import creates is outside the ACL.** `AUTH_BUDGET_ACL` maps
    principals to budget sync IDs that exist when the ACL is evaluated, so a budget
    that first appears mid-session has no ACL entry covering it. A session with a
@@ -488,7 +509,11 @@ withheld under `MCP_READ_ONLY=true`.
 
 `MCP_TOOLSETS`, `MCP_TOOLS` and `MCP_READ_ONLY` choose which tools the server publishes.
 A tool that is not published is both left out of `tools/list` and refused if called by
-name; the refusal names the setting responsible. When both settings hide a tool, the refusal names `MCP_READ_ONLY`, because no toolset change can publish it while read-only is on.
+name; the refusal names the setting responsible. The names below are the legacy `actual_*`
+operations. Under the default compact surface (`MCP_TOOL_SURFACE=compact`, #680) these
+settings still decide per operation: a compact tool is listed when any operation behind it
+is selected, an action whose operation is hidden is refused naming the setting, and a
+compact tool with a write-capable action is hidden whole under `MCP_READ_ONLY=true`. When both settings hide a tool, the refusal names `MCP_READ_ONLY`, because no toolset change can publish it while read-only is on.
 
 - `MCP_READ_ONLY=true` hides and refuses every write-capable tool: every tool that
   reaches the adapter write queue, plus `actual_bank_sync`, `actual_budgets_export`,
@@ -528,6 +553,33 @@ merged outside the release path. If these rulesets are changed, update this sect
 between this record and `gh api repos/agigante80/actual-mcp-server/rulesets` output is a
 red flag.
 
+### Third-party GitHub Apps with write access (#693)
+
+The `coderabbitai` GitHub App is installed on this repository only ("Only select
+repositories"), as an advisory reviewer for pull requests from outside contributors. It is in
+neither ruleset's bypass list, so it cannot push to `main`. GitHub grants it read and write on
+code, pull requests, issues, checks, commit statuses and workflows; `.coderabbit.yaml` is what
+narrows its behaviour, and `tests/unit/coderabbit_config.test.js` pins that narrowing:
+
+- **No pushes.** Every finishing touch that commits or opens a branch (`unit_tests`, `autofix`,
+  `fix_ci`, `resolve_merge_conflict`) is off. They are on by schema default, and a branch
+  pushed into the repository runs workflows from that branch.
+- **No approvals, no failing status.** `auto_approvals` is off, an author cannot ask for an
+  approval, and `fail_commit_status` is false. A finding is input for the maintainer, never an
+  authorisation decision.
+- **No automatic issue writes.** Issue enrichment and planning are off.
+- **Two advisory checks.** Two custom pre-merge checks ("Tests cover the change" and "Docs
+  cover the change", #727) run in `warning` mode: each result is a row in the pre-merge table of
+  the app's Walkthrough comment (no check run of its own), and a failure blocks nothing. They run in a read-only sandbox, execute no test and push nothing, and their criteria
+  are the test review list and the "Docs to update with a change" section in `AGENTS.md`.
+  `error` mode is refused by the pin test.
+
+Residual risk the config cannot remove: anyone who mentions the app in a pull request comment
+can ask it to open a GitHub issue here, and no config key disables that. Such an issue is
+triaged like any outside report (a hypothesis, never ground truth) and closed when it is noise.
+The config is a behaviour setting, not a permission boundary: the boundary is the app's GitHub
+permissions, and uninstalling it (Settings, Applications) revokes all of them at once.
+
 ---
 
 ## 🛡️ Data Protection
@@ -562,7 +614,7 @@ chown $USER:$USER ./actual-data
 
 **Location**: `MCP_BRIDGE_DATA_DIR/budget-preferences.json`
 
-**Contents**: a map from `sha256(principal)` to a budget sync id. It lets a re-initialized session (after a server restart) restore the user's last active budget.
+**Contents**: a map from `sha256(principal)` to a budget sync id. It lets a re-initialized session (after a server restart) restore the user's last active budget, and any new session of the same principal starts on it. Every holder of the one legacy bearer token is one principal.
 
 **Protection**:
 - ✅ Keys are SHA-256 hashes of the principal: the raw OIDC subject, email, or bearer token is never written to disk
@@ -582,7 +634,7 @@ chown $USER:$USER ./actual-data
 - ✅ Log rotation with retention limits
 - ✅ Tool arguments and results are never written to the logs (#556), at any level
 - ✅ Tool error messages are never written to the logs (#559); the failure record carries the error class
-- ✅ The startup budget registry line carries counts and schemes only (#621); the adapter's login, operation and budget-switch lines print a server URL as its origin (no userinfo, path or query) but still name the budget involved. Login error messages still keep the URL path and query (userinfo is stripped). Logs written by earlier versions keep the old line until rotated
+- ✅ The startup budget registry line carries counts and schemes only (#621); the adapter's login, operation and budget-switch lines print a server URL as its origin (no userinfo, path or query) but still name the configured budget involved. A file found by budget discovery is never named in a log line (#689): it shows as `discovered file` with its Sync ID, because its name was chosen by its owner, who may be another user. A session that starts on a budget automatically in discovery mode logs one `Starting budget selected` line with the Sync ID and whether the budget was configured or discovered. Login error messages still keep the URL path and query (userinfo is stripped). Logs written by earlier versions keep the old line until rotated
 - ✅ `actual_budgets_list_available` and `actual_budgets_switch` show a budget's server as its origin only (#628), so a reverse-proxy credential written into `BUDGET_n_SERVER_URL` or `ACTUAL_SERVER_URL` never reaches the client or its model provider. A server under a subpath shows as its host
 
 **Tool content is never logged (#556).** Tool arguments and results are the user's budget data:
@@ -797,6 +849,19 @@ The advertised host is safe to accept: an IP literal cannot come out of DNS rebi
 check is the cross-site defence, and it compares hostnames only (not scheme or port), so any
 other web app served under the same name counts as a trusted Origin. Set
 `MCP_BRIDGE_PUBLIC_HOST` only to a name whose DNS you own.
+
+#777: `/mcp-info` is unauthenticated, so its `advertisedUrl` no longer carries the detected internal address. Unless
+`MCP_BRIDGE_PUBLIC_HOST` is set, it is built from the request `Host` after a strict match (a host
+name, IPv4 address or bracketed IPv6 literal, an optional port in 1 to 65535, at most 261
+characters); the output is assembled only from the matched text and the configured scheme and
+path, so userinfo, a path, whitespace or a control character cannot reach the response. A `Host`
+that fails the match, or none, leaves the field out: it is never echoed and the internal address is
+never the fallback. The route sends `Vary: Host` so a shared cache cannot hand one caller's value
+to another. `X-Forwarded-Host` and `X-Forwarded-Proto` are not read: `trust proxy` is off.
+
+Every 401 from a token server carries a fixed `WWW-Authenticate: Bearer realm="actual-mcp-server"`
+challenge (RFC 9110 15.5.2), with `error="invalid_request"` or `error="invalid_token"` where RFC
+6750 3.1 calls for one. It is built from constants and never contains the presented token.
 
 With a token or OIDC configured nothing changes unless `MCP_ALLOWED_HOSTS` is set; then the
 listed names plus the loopback names are enforced as `Host` (no Origin check). stdio is

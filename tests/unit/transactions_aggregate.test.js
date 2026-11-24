@@ -45,6 +45,32 @@ const dateRange = { startDate: '2025-01-01', endDate: '2025-03-31' };
 
 console.log('\n[transactions-aggregate] accounting (pure)');
 
+check('transfer-only accounts keep transactionCount 0 and a transferCount above 0 (#780: budget_cleanup relies on it)', () => {
+  const snapshot = baseSnapshot([
+    { id: 't-out', date: '2025-01-04', amount: -10000, account: 'acc-1', transfer_id: 't-in' },
+    { id: 't-in', date: '2025-01-04', amount: 10000, account: 'acc-2', transfer_id: 't-out' },
+    { id: 't-out2', date: '2025-01-09', amount: -10000, account: 'acc-1', transfer_id: 't-in2' },
+    { id: 't-in2', date: '2025-01-09', amount: 10000, account: 'acc-2', transfer_id: 't-out2' },
+  ]);
+  const r = aggregateTransactions(snapshot, { ...dateRange, groupBy: ['account'], includeIncome: true, excludeTransfers: false });
+  const sender = r.groups.find((g) => g.accountId === 'acc-1');
+  assert.strictEqual(sender.transactionCount, 0);
+  assert.strictEqual(sender.transferCount, 2);
+});
+
+check('a category used only on a transfer has transactionCount 0 and transferCount 1 (#780: every group carries transferCount)', () => {
+  const snapshot = baseSnapshot([
+    { id: 't-out', date: '2025-01-04', amount: -10000, account: 'acc-1', transfer_id: 't-in', category: 'cat-food' },
+    { id: 't-in', date: '2025-01-04', amount: 10000, account: 'acc-2', transfer_id: 't-out' },
+  ]);
+  const r = aggregateTransactions(snapshot, { ...dateRange, groupBy: ['category'], includeIncome: true, excludeTransfers: false });
+  const g = r.groups.find((x) => x.categoryId === 'cat-food');
+  assert.ok(g, 'the category has a group');
+  assert.strictEqual(g.transactionCount, 0);
+  assert.strictEqual(g.transferCount, 1);
+});
+
+
 check('a CATEGORIZED transfer (income category) is excluded even with includeIncome=true', () => {
   const snapshot = baseSnapshot([
     { id: 't-pay', date: '2025-01-05', amount: 500000, account: 'acc-1', category: 'cat-inc', payee: 'pay-1' },

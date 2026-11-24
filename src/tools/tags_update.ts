@@ -7,13 +7,13 @@ export default createTool({
   name: 'actual_tags_update',
   description:
     'Update an existing tag in Actual Budget. At least one of tag/color/description must be provided. ' +
-    'The id must be a valid UUID from actual_tags_list. ' +
-    'If the id does not exist, a not-found error is returned (the API would silently no-op; this tool adds a pre-flight guard). ' +
-    'The "tag" field is the raw word WITHOUT a leading "#" character.',
+    'The id must be a valid UUID from actual_tags_list; an unknown id returns a not-found error. ' +
+    'The "tag" field is the raw word WITHOUT a leading "#" character. ' +
+    'A rename does not change transaction notes, which keep the old #word.',
   schema: z.object({
     id: CommonSchemas.tagId,
-    tag: z.string().min(1, 'tag must not be empty').optional().describe('New tag word without "#" prefix'),
-    color: z.string().optional().describe('New color string (convention: CSS hex like "#112233")'),
+    tag: CommonSchemas.tagName.optional(),
+    color: CommonSchemas.tagColor.optional(),
     description: z.string().optional().describe('New description'),
   }).refine(
     (data) => data.tag !== undefined || data.color !== undefined || data.description !== undefined,

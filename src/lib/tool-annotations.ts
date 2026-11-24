@@ -38,10 +38,10 @@
 import type { ToolAnnotations } from '@modelcontextprotocol/sdk/types.js';
 
 /**
- * The ONLY tool that reaches outside this Actual instance. Bank sync calls a third-party
+ * The tools that reach outside this Actual instance: bank sync (and manage_accounts, whose bank_sync action is the same call, #676) calls a third-party
  * aggregator (GoCardless / SimpleFIN), which is the textbook "open world".
  */
-const OPEN_WORLD = new Set<string>(['actual_bank_sync']);
+const OPEN_WORLD = new Set<string>(['actual_bank_sync', 'manage_accounts']);
 
 /**
  * Tools that provably change NOTHING. Verified mechanically by
@@ -60,14 +60,23 @@ const OPEN_WORLD = new Set<string>(['actual_bank_sync']);
  *   actual_session_close   closes a pooled connection: server state, not budget data.
  */
 const READ_ONLY = new Set<string>([
+  // Compact tools (#672): every action of each maps to a legacy tool outside WRITE_CAPABLE.
+  // tests/unit/compact_dispatch.test.js re-derives that from the registry. readOnlyHint implies
+  // idempotentHint true below, so neither is added to IDEMPOTENT.
+  'get_context',
+  'list_entities',
+  'search_transactions',
+  'summarize_transactions',
+  'list_budget_months',
+  'run_query',
   'actual_account_groups_list',
   'actual_account_flow_summary',
   'actual_recurring_expenses_summary',
   'actual_accounts_get_balance',
   'actual_accounts_list',
   'actual_budgets_get_all',
-  'actual_budgets_getMonth',
-  'actual_budgets_getMonths',
+  'actual_budgets_get_month',
+  'actual_budgets_get_months',
   'actual_budgets_list_available',
   'actual_categories_get',
   'actual_category_groups_get',
@@ -108,6 +117,17 @@ const READ_ONLY = new Set<string>([
  * and in #357), so a close can be a delete.
  */
 const DESTRUCTIVE = new Set<string>([
+  // Compact tool (#675): delete and merge remove rows, so the tool is destructive as a whole.
+  'manage_transactions',
+  // Compact tools (#676): each has a delete action (accounts also close, payees also merge).
+  'manage_accounts',
+  'manage_categories',
+  'manage_payees',
+  'manage_tags',
+  'manage_rules',
+  'manage_schedules',
+  // Compact tools (#678): manage_budget_files exports (overwrites a same-named file) and imports (#687: adds a server budget file no tool here removes, so irreversible; it replaces nothing); manage_budget_months only sets fields in place, so it is ADDITIVE.
+  'manage_budget_files',
   'actual_account_groups_delete',
   'actual_accounts_close',
   'actual_accounts_delete',
@@ -124,6 +144,8 @@ const DESTRUCTIVE = new Set<string>([
   // judgement call rather than a derivation.
   'actual_bank_sync',
   'actual_budgets_export',
+  // #687: the import replaces nothing, but it is irreversible from here (it adds a server budget
+  // file no tool removes), so the hint stays to make a client ask first.
   'actual_budgets_import',
   'actual_categories_delete',
   'actual_category_groups_delete',
@@ -160,7 +182,7 @@ const DESTRUCTIVE = new Set<string>([
  *
  * THE POLICY, stated so the boundary is a decision rather than an omission: overwriting a
  * FIELD on an existing row is additive; removing or replacing a ROW is destructive. So
- * `budgets_setAmount` and `accounts_update` are additive, while `transactions_update` is
+ * `budgets_set_amount` and `accounts_update` are additive, while `transactions_update` is
  * not, because on the split path it deletes and recreates child rows.
  */
 const ADDITIVE = new Set<string>([
@@ -170,10 +192,10 @@ const ADDITIVE = new Set<string>([
   'actual_accounts_reopen',
   'actual_accounts_update',
   'actual_budgets_switch',
-  'actual_budgets_holdForNextMonth',
-  'actual_budgets_resetHold',
-  'actual_budgets_setAmount',
-  'actual_budgets_setCarryover',
+  'actual_budgets_hold_for_next_month',
+  'actual_budgets_reset_hold',
+  'actual_budgets_set_amount',
+  'actual_budgets_set_carryover',
   'actual_budgets_transfer',
   'actual_budget_updates_batch',
   'actual_categories_create',
@@ -195,6 +217,7 @@ const ADDITIVE = new Set<string>([
   'actual_tags_create',
   'actual_tags_update',
   'actual_notes_update',
+  'manage_budget_months',
 ]);
 
 /**
@@ -214,7 +237,7 @@ const ADDITIVE = new Set<string>([
  *
  * The exclusions are the point:
  *   most `*_create`             each call makes ANOTHER entity, so the state differs
- *   budgets_holdForNextMonth    upstream ADDS to the buffer, so a retry holds twice (#355)
+ *   budgets_hold_for_next_month    upstream ADDS to the buffer, so a retry holds twice (#355)
  *   budgets_transfer            moves money again on each call
  *   payees_merge                the sources are gone after the first
  *   bank_sync                   imports whatever is new upstream
@@ -243,9 +266,9 @@ const IDEMPOTENT = new Set<string>([
   'actual_accounts_reopen',
   'actual_accounts_update',
   'actual_budget_updates_batch',
-  'actual_budgets_resetHold',
-  'actual_budgets_setAmount',
-  'actual_budgets_setCarryover',
+  'actual_budgets_reset_hold',
+  'actual_budgets_set_amount',
+  'actual_budgets_set_carryover',
   'actual_budgets_switch',
   'actual_categories_delete',
   'actual_categories_update',

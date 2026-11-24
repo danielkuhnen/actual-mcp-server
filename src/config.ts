@@ -216,6 +216,24 @@ export const configSchema = z.object({
       return z.NEVER;
     }),
 
+  // MCP_TOOL_SURFACE (#671) picks WHICH list of tools this process publishes: the compact
+  // registry ('compact', the default since #680), the 85 legacy tools ('legacy', the opt-out),
+  // or both ('all', for the test stacks). Trimmed and case-insensitive; anything else refuses startup naming the
+  // value, like MCP_READ_ONLY. docs/explanation/compact-tool-surface.md has the design.
+  MCP_TOOL_SURFACE: z
+    .string()
+    .optional()
+    .transform((raw, ctx): 'legacy' | 'compact' | 'all' => {
+      const v = (raw ?? '').trim().toLowerCase();
+      if (v === '') return 'compact';
+      if (v === 'legacy' || v === 'compact' || v === 'all') return v;
+      ctx.addIssue({
+        code: 'custom',
+        message: `MCP_TOOL_SURFACE must be "legacy", "compact" or "all" (case-insensitive; unset or empty means compact), got ${JSON.stringify(raw)}.`,
+      });
+      return z.NEVER;
+    }),
+
   // --- OIDC bearer auth (CF-5) ---
   // Set AUTH_PROVIDER=oidc to enable JWT validation (src/auth/bearer.ts).
   // When 'none' (default), the legacy MCP_SSE_AUTHORIZATION static Bearer token is used.
@@ -296,6 +314,9 @@ export const configSchema = z.object({
   // functions when that server runs in multi-user (OpenID) mode. Defaulting to
   // 'static' means no existing deployment changes posture on upgrade.
   AUTH_BUDGET_ACL_SOURCE: z.enum(['static', 'actual']).default('static'),
+  // #688: also offer each OIDC user the files Actual shares with them on ACTUAL_SERVER_URL, beside
+  // the configured budgets. Opt-in; refused below unless AUTH_PROVIDER=oidc and the source is 'actual'.
+  AUTH_BUDGET_DISCOVERY: z.enum(['true', 'false']).optional().transform(value => value === 'true'),
   // #338/#343: which token claim identifies the principal when
   // AUTH_BUDGET_ACL_SOURCE=actual. Default 'auto' walks Actual's OWN precedence
   // (preferred_username, login, email, id, sub) and matches the result against
@@ -364,6 +385,11 @@ export const configSchema = z.object({
       }
     }),
 })
+  // #688: discovery reads Actual's per-file access list, which only the OIDC + 'actual' pair resolves.
+  .refine(
+    cfg => !cfg.AUTH_BUDGET_DISCOVERY || (cfg.AUTH_PROVIDER === 'oidc' && cfg.AUTH_BUDGET_ACL_SOURCE === 'actual'),
+    { path: ['AUTH_BUDGET_DISCOVERY'], message: 'Budget discovery requires AUTH_PROVIDER=oidc and AUTH_BUDGET_ACL_SOURCE=actual' },
+  )
   // #343 UPGRADE GUARD. v0.11.0 and v0.11.1 shipped AUTH_BUDGET_ACL_CLAIM=sub as
   // the default AND the README told operators to keep it. That combination cannot
   // match anything: Actual stores no `sub`, so every principal resolves to zero

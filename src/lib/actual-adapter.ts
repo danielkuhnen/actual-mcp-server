@@ -9,75 +9,125 @@ import api from '@actual-app/api';
 // IS module.exports, so all methods are accessible as properties.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const {
-  addTransactions: rawAddTransactions,
+  addTransactions: rawAddTransactionsUnguarded,
   getAccounts: rawGetAccounts,
-  importTransactions: rawImportTransactions,
+  importTransactions: rawImportTransactionsUnguarded,
   getTransactions: rawGetTransactions,
   getCategories: rawGetCategories,
-  createCategory: rawCreateCategory,
+  createCategory: rawCreateCategoryUnguarded,
   getPayees: rawGetPayees,
   getCommonPayees: rawGetCommonPayees,
-  createPayee: rawCreatePayee,
+  createPayee: rawCreatePayeeUnguarded,
   getBudgetMonths: rawGetBudgetMonths,
   getBudgetMonth: rawGetBudgetMonth,
-  setBudgetAmount: rawSetBudgetAmount,
-  createAccount: rawCreateAccount,
-  updateAccount: rawUpdateAccount,
+  setBudgetAmount: rawSetBudgetAmountUnguarded,
+  createAccount: rawCreateAccountUnguarded,
+  updateAccount: rawUpdateAccountUnguarded,
   getAccountBalance: rawGetAccountBalance,
-  updateTransaction: rawUpdateTransaction,
-  deleteTransaction: rawDeleteTransaction,
-  updateCategory: rawUpdateCategory,
-  deleteCategory: rawDeleteCategory,
-  updatePayee: rawUpdatePayee,
-  deletePayee: rawDeletePayee,
-  deleteAccount: rawDeleteAccount,
+  updateTransaction: rawUpdateTransactionUnguarded,
+  deleteTransaction: rawDeleteTransactionUnguarded,
+  updateCategory: rawUpdateCategoryUnguarded,
+  deleteCategory: rawDeleteCategoryUnguarded,
+  updatePayee: rawUpdatePayeeUnguarded,
+  deletePayee: rawDeletePayeeUnguarded,
+  deleteAccount: rawDeleteAccountUnguarded,
   getRules: rawGetRules,
-  createRule: rawCreateRule,
-  updateRule: rawUpdateRule,
-  deleteRule: rawDeleteRule,
-  setBudgetCarryover: rawSetBudgetCarryover,
-  closeAccount: rawCloseAccount,
-  reopenAccount: rawReopenAccount,
+  createRule: rawCreateRuleUnguarded,
+  updateRule: rawUpdateRuleUnguarded,
+  deleteRule: rawDeleteRuleUnguarded,
+  setBudgetCarryover: rawSetBudgetCarryoverUnguarded,
+  closeAccount: rawCloseAccountUnguarded,
+  reopenAccount: rawReopenAccountUnguarded,
   getCategoryGroups: rawGetCategoryGroups,
-  createCategoryGroup: rawCreateCategoryGroup,
-  updateCategoryGroup: rawUpdateCategoryGroup,
-  deleteCategoryGroup: rawDeleteCategoryGroup,
-  mergePayees: rawMergePayees,
-  mergeTransactions: rawMergeTransactions,
+  createCategoryGroup: rawCreateCategoryGroupUnguarded,
+  updateCategoryGroup: rawUpdateCategoryGroupUnguarded,
+  deleteCategoryGroup: rawDeleteCategoryGroupUnguarded,
+  mergePayees: rawMergePayeesUnguarded,
+  mergeTransactions: rawMergeTransactionsUnguarded,
   getPayeeRules: rawGetPayeeRules,
-  holdBudgetForNextMonth: rawHoldBudgetForNextMonth,
-  resetBudgetHold: rawResetBudgetHold,
+  holdBudgetForNextMonth: rawHoldBudgetForNextMonthUnguarded,
+  resetBudgetHold: rawResetBudgetHoldUnguarded,
   runQuery: rawRunQuery,
-  runBankSync: rawRunBankSync,
+  runBankSync: rawRunBankSyncUnguarded,
   getBudgets: rawGetBudgets,
   getIDByName: rawGetIDByName,
   getServerVersion: rawGetServerVersion,
   getSchedules: rawGetSchedules,
   getScheduleDates: rawGetScheduleDates,
-  createSchedule: rawCreateSchedule,
-  updateSchedule: rawUpdateSchedule,
-  deleteSchedule: rawDeleteSchedule,
+  createSchedule: rawCreateScheduleUnguarded,
+  updateSchedule: rawUpdateScheduleUnguarded,
+  deleteSchedule: rawDeleteScheduleUnguarded,
   getTags: rawGetTags,
-  createTag: rawCreateTag,
-  updateTag: rawUpdateTag,
-  deleteTag: rawDeleteTag,
+  createTag: rawCreateTagUnguarded,
+  updateTag: rawUpdateTagUnguarded,
+  deleteTag: rawDeleteTagUnguarded,
   getNote: rawGetNote,
-  updateNote: rawUpdateNote,
+  updateNote: rawUpdateNoteUnguarded,
   exportBudget: rawExportBudget,
-  importBudget: rawImportBudget,
+  importBudget: rawImportBudgetUnguarded,
   getPreferences: rawGetPreferences,
   getAccountGroups: rawGetAccountGroups,
-  createAccountGroup: rawCreateAccountGroup,
-  updateAccountGroup: rawUpdateAccountGroup,
-  deleteAccountGroup: rawDeleteAccountGroup,
+  createAccountGroup: rawCreateAccountGroupUnguarded,
+  updateAccountGroup: rawUpdateAccountGroupUnguarded,
+  deleteAccountGroup: rawDeleteAccountGroupUnguarded,
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
 } = api as any;
 import { EventEmitter } from 'events';
 import observability from '../observability.js';
 import { retry, isRetryableError, isRateLimitError } from './retry.js';
-import { withOpTimeout } from './opTimeout.js';
+import { withOpTimeout, runAbandonable, assertOperationLive } from './opTimeout.js';
 import { markInitFailure } from './init-failure.js';
-import { NotFoundRefusal, OutOfRangeRefusal, constraintErrorMsg, errorLogFields, isPreflightRefusal } from './errors.js';
+import { MAX_BUDGET_AMOUNT_CENTS } from './budget-limits.js';
+import { incomeSetAmountRefusal, incomeTransferRefusal, isTrackingBudgetMonth } from './actual-adapter/budget-income.js';
+import { ConflictRefusal, LockedRefusal, NotFoundRefusal, OutOfRangeRefusal, constraintErrorMsg, errorLogFields, isPreflightRefusal } from './errors.js';
+
+// #800: every raw WRITE binding refuses to run once its operation was abandoned after the write
+// timeout (see opTimeout.ts). One chokepoint at the binding, so no tool or adapter call site
+// changes and a new write method inherits it. Per-site checks were rejected (#390/#393: they miss
+// a site). Reads, runQuery, exportBudget and getServerVersion stay unwrapped on purpose.
+const guarded = <A extends unknown[], R>(fn: (...a: A) => R) => (...a: A): R => {
+  assertOperationLive();
+  return fn(...a);
+};
+const rawAddTransactions = guarded(rawAddTransactionsUnguarded);
+const rawImportTransactions = guarded(rawImportTransactionsUnguarded);
+const rawSetBudgetAmount = guarded(rawSetBudgetAmountUnguarded);
+const rawCreateAccount = guarded(rawCreateAccountUnguarded);
+const rawUpdateAccount = guarded(rawUpdateAccountUnguarded);
+const rawUpdateTransaction = guarded(rawUpdateTransactionUnguarded);
+const rawDeleteTransaction = guarded(rawDeleteTransactionUnguarded);
+const rawCreateCategory = guarded(rawCreateCategoryUnguarded);
+const rawUpdateCategory = guarded(rawUpdateCategoryUnguarded);
+const rawDeleteCategory = guarded(rawDeleteCategoryUnguarded);
+const rawCreatePayee = guarded(rawCreatePayeeUnguarded);
+const rawUpdatePayee = guarded(rawUpdatePayeeUnguarded);
+const rawDeletePayee = guarded(rawDeletePayeeUnguarded);
+const rawDeleteAccount = guarded(rawDeleteAccountUnguarded);
+const rawCreateRule = guarded(rawCreateRuleUnguarded);
+const rawUpdateRule = guarded(rawUpdateRuleUnguarded);
+const rawDeleteRule = guarded(rawDeleteRuleUnguarded);
+const rawSetBudgetCarryover = guarded(rawSetBudgetCarryoverUnguarded);
+const rawCloseAccount = guarded(rawCloseAccountUnguarded);
+const rawReopenAccount = guarded(rawReopenAccountUnguarded);
+const rawCreateCategoryGroup = guarded(rawCreateCategoryGroupUnguarded);
+const rawUpdateCategoryGroup = guarded(rawUpdateCategoryGroupUnguarded);
+const rawDeleteCategoryGroup = guarded(rawDeleteCategoryGroupUnguarded);
+const rawMergePayees = guarded(rawMergePayeesUnguarded);
+const rawMergeTransactions = guarded(rawMergeTransactionsUnguarded);
+const rawHoldBudgetForNextMonth = guarded(rawHoldBudgetForNextMonthUnguarded);
+const rawResetBudgetHold = guarded(rawResetBudgetHoldUnguarded);
+const rawRunBankSync = guarded(rawRunBankSyncUnguarded);
+const rawCreateSchedule = guarded(rawCreateScheduleUnguarded);
+const rawUpdateSchedule = guarded(rawUpdateScheduleUnguarded);
+const rawDeleteSchedule = guarded(rawDeleteScheduleUnguarded);
+const rawCreateTag = guarded(rawCreateTagUnguarded);
+const rawUpdateTag = guarded(rawUpdateTagUnguarded);
+const rawDeleteTag = guarded(rawDeleteTagUnguarded);
+const rawUpdateNote = guarded(rawUpdateNoteUnguarded);
+const rawImportBudget = guarded(rawImportBudgetUnguarded);
+const rawCreateAccountGroup = guarded(rawCreateAccountGroupUnguarded);
+const rawUpdateAccountGroup = guarded(rawUpdateAccountGroupUnguarded);
+const rawDeleteAccountGroup = guarded(rawDeleteAccountGroupUnguarded);
 import { amountOpMismatch } from './schemas/schedule-amount.js';
 import { findMatchingRule, type RuleCondition } from './rule-matching.js';
 import logger from '../logger.js';
@@ -85,10 +135,11 @@ import { checkServerVersionOnce } from './server-version-guard.js';
 import config from '../config.js';
 import { formatBudgetRegistrySummary, logSafeOrigin, parseBudgetRegistry, summarizeBudgetRegistry, type BudgetConfig, type BudgetRegistrySummary } from './budget-registry.js';
 import { getPreferredBudgetSyncId, setPreferredBudgetSyncId, pickAllowedPreferredBudget } from './budget-preference-store.js';
-import { requestContext } from './requestContext.js';
+import { requestContext, type RequestStore } from './requestContext.js';
 import { connectionPool } from './ActualConnectionPool.js';
 import { isApiInitialized, setApiInitialized, getLoadedBudgetSyncId, awaitAbandonedBudgetLoad, hasPendingBudgetLoad, isApiLoggedInTo, setLoginsSpanServers } from './apiState.js';
 import { initApiLoggedIn } from './apiLogin.js';
+import { listRemoteBudgetFiles } from './remoteBudgetFiles.js';
 import { withApiLock } from './apiLock.js';
 import { loadBudgetTracked, importBudgetTracked } from './budgetLoader.js';
 
@@ -116,8 +167,8 @@ export function getBudgetRegistrySummary(): BudgetRegistrySummary {
 }
 
 /**
- * Per-session active budget. Map from sessionId to lowercased budget key
- * (matches the keys in budgetRegistry).
+ * Per-session active budget. Map from sessionId to a lowercased configured name,
+ * or, in discovery mode, a Sync ID plus the configured name when present.
  *
  * Issue #156: previously a single module-level `activeBudgetKey` was shared
  * across all sessions. In multi-user OIDC mode that meant one user's
@@ -139,7 +190,8 @@ export function getBudgetRegistrySummary(): BudgetRegistrySummary {
  * layer no longer holds, so a switch or a #189 restore that was in flight across
  * the teardown cannot re-create the entry after it was released.
  */
-const sessionBudgetState = new Map<string, string>();
+type SessionBudgetSelection = string | { syncId: string; configuredName?: string };
+const sessionBudgetState = new Map<string, SessionBudgetSelection>();
 
 /**
  * #564: is this session still held by its transport? The HTTP server registers
@@ -156,12 +208,82 @@ export function setSessionLivenessCheck(check: (sessionId: string) => boolean): 
   isSessionLive = check;
 }
 
-function setSessionBudget(sessionId: string, key: string): void {
+function setSessionBudget(sessionId: string, budget: BudgetConfig, discovery: boolean): void {
   if (!isSessionLive(sessionId)) {
     logger.debug(`[ADAPTER] Session ${sessionId} ended before its budget selection was committed; not recording it`);
     return;
   }
-  sessionBudgetState.set(sessionId, key);
+  const name = budget.name.toLowerCase();
+  const configuredName = isConfiguredBudget(budget) ? budget.name : undefined;
+  sessionBudgetState.set(sessionId, discovery ? { syncId: budget.syncId, configuredName } : name);
+}
+
+export function pinSessionBudget(sessionId: string, budget: BudgetConfig): void {
+  setSessionBudget(sessionId, budget, true);
+}
+
+export function isConfiguredBudget(budget: BudgetConfig): boolean {
+  return budgetRegistry.get(budget.name.toLowerCase()) === budget;
+}
+
+// #689: a discovered file is named by its owner, who may be another user. Since a session can
+// now start on one without an explicit switch, log lines name operator-configured budgets only.
+function budgetLogName(budget: BudgetConfig): string {
+  return isConfiguredBudget(budget) ? budget.name : 'discovered file';
+}
+
+function requestBudgets(): BudgetConfig[] {
+  const entries = [...budgetRegistry.values()];
+  const store = requestContext.getStore();
+  if (!config.AUTH_BUDGET_DISCOVERY || !store?.discoveredBudgets) return entries;
+
+  const metadata = new Map(store.discoveredBudgets.map(file => [file.syncId, file]));
+  const allowed = new Set(store.allowedBudgets);
+  const selectable = entries.filter(entry => allowed.has(entry.syncId) &&
+    (!metadata.get(entry.syncId)?.encrypted || Boolean(entry.encryptionPassword)));
+  const configuredIds = new Set(entries.map(entry => entry.syncId));
+  for (const file of metadata.values()) {
+    if (!configuredIds.has(file.syncId) && !file.encrypted && allowed.has(file.syncId)) {
+      selectable.push({ syncId: file.syncId, name: file.name, serverUrl: config.ACTUAL_SERVER_URL,
+        password: config.ACTUAL_PASSWORD });
+    }
+  }
+  return selectable;
+}
+
+export function isSelectableBudget(budget: BudgetConfig): boolean {
+  return requestBudgets().some(entry => entry.syncId === budget.syncId && entry.name === budget.name);
+}
+
+type BudgetFile = Pick<BudgetConfig, 'syncId' | 'name' | 'serverUrl'>;
+
+/** Listing and refusals use this grant-filtered view. Only requestBudgets() determines what can open. */
+function lockedBudgets(): BudgetFile[] {
+  const store = requestContext.getStore();
+  if (!config.AUTH_BUDGET_DISCOVERY || !store?.discoveredBudgets) return [];
+  const allowed = new Set(store.allowedBudgets);
+  const entries = [...budgetRegistry.values()];
+  const keyed = new Set(entries.filter(entry => entry.encryptionPassword).map(entry => entry.syncId));
+  return store.discoveredBudgets
+    .filter(file => file.encrypted && allowed.has(file.syncId) && !keyed.has(file.syncId))
+    .map(file => {
+      const configured = entries.find(entry => entry.syncId === file.syncId);
+      return { syncId: file.syncId, name: configured?.name ?? file.name,
+        serverUrl: configured?.serverUrl ?? config.ACTUAL_SERVER_URL };
+    });
+}
+
+function activeBudgetRefusal(): Error {
+  const locked = lockedBudgets();
+  if (locked.length) {
+    const sessionId = requestContext.getStore()?.sessionId;
+    const pin = sessionId ? sessionBudgetState.get(sessionId) : undefined;
+    const pinnedId = typeof pin === 'string' ? budgetRegistry.get(pin)?.syncId : pin?.syncId;
+    if (pinnedId && locked.some(file => file.syncId === pinnedId)) return new LockedRefusal(pinnedId);
+    if (requestBudgets().length === 0) return new LockedRefusal(locked[0].syncId, locked.length);
+  }
+  return new Error("Budget ACL: the active budget is not in this session's allowedBudgets. " +
+    'Call actual_budgets_list_available and switch to a permitted budget.');
 }
 
 function getActiveBudgetConfig(): BudgetConfig {
@@ -171,12 +293,41 @@ function getActiveBudgetConfig(): BudgetConfig {
   // env-default budget (first registry entry).
   const store = requestContext.getStore();
   const sessionId = store?.sessionId;
+  const discovered = config.AUTH_BUDGET_DISCOVERY ? store?.discoveredBudgets : undefined;
   if (sessionId) {
     const key = sessionBudgetState.get(sessionId);
     if (key) {
+      if (typeof key !== 'string') {
+        if (!discovered) throw activeBudgetRefusal();
+        const selected = requestBudgets().find(entry => entry.syncId === key.syncId &&
+          (key.configuredName === undefined || entry.name === key.configuredName));
+        if (!selected) throw activeBudgetRefusal();
+        return selected;
+      }
       const found = budgetRegistry.get(key);
       if (found) return found;
     }
+  }
+
+  if (discovered && store) {
+    const selectable = requestBudgets();
+    const preferred = pickAllowedPreferredBudget(
+      getPreferredBudgetSyncId(store.principal), store.allowedBudgets, selectable,
+    );
+    if (preferred) return preferred;
+    const configured = selectable.find(isConfiguredBudget);
+    if (configured) return configured;
+
+    // Count permitted files before removing encrypted or configured rows. Another
+    // owner's share must not become the default just because it is the only usable file.
+    const allowed = new Set(store.allowedBudgets);
+    const permitted = discovered.filter(file => allowed.has(file.syncId));
+    if (permitted.length === 1 && selectable.length === 1) return selectable[0];
+    // The default sentinel preserves connection-free listing. The live ACL refuses its use.
+    return [...budgetRegistry.values()][0];
+  }
+
+  if (sessionId) {
     // #189 Phase 1: no in-session selection yet (e.g. a fresh session after a
     // server restart + client re-initialize). Restore the principal's persisted
     // budget, but ONLY if the live ACL still permits it (pickAllowedPreferredBudget
@@ -188,7 +339,7 @@ function getActiveBudgetConfig(): BudgetConfig {
       [...budgetRegistry.values()],
     );
     if (restored) {
-      setSessionBudget(sessionId, restored.name.toLowerCase());
+      setSessionBudget(sessionId, restored, false);
       return restored;
     }
   }
@@ -204,7 +355,7 @@ function getActiveBudgetConfig(): BudgetConfig {
   const values = [...budgetRegistry.values()];
   const restricting = restrictingAllowList(store?.allowedBudgets);
   if (restricting) {
-    const permitted = values.find((b) => restricting.includes(b.syncId));
+    const permitted = values.find(b => restricting.includes(b.syncId));
     if (permitted) return permitted;
   }
   return values[0];
@@ -293,6 +444,8 @@ async function ensureLoadedBudgetMatchesSession(): Promise<void> {
     // download landed. Initialise explicitly instead. No recursion: initActualApiForOperation
     // only calls back into here when the singleton IS live, and it is not.
     await initActualApiForOperation();
+    // #799: a budget load changes what every listing means; a drain can span budgets.
+    invalidateDrainListing('accounts', 'categories', 'categoryGroups', 'payees');
     return;
   }
 
@@ -308,7 +461,7 @@ async function ensureLoadedBudgetMatchesSession(): Promise<void> {
   logger.warn('[ADAPTER] loaded budget does not match this session; re-selecting before the operation', {
     loadedSyncId: loaded ?? null,
     wantedSyncId: wanted.syncId,
-    budget: wanted.name,
+    budget: budgetLogName(wanted),
   });
 
   // Push anything pending for the budget we are about to close. Since #390 made re-selection
@@ -367,11 +520,17 @@ function loginOf(budget: BudgetConfig): { serverUrl: string; password: string } 
  */
 async function loadBudgetOnItsServer(budget: BudgetConfig): Promise<void> {
   const login = loginOf(budget);
-  if (!isApiLoggedInTo(login)) {
-    logger.info(`[ADAPTER] logging the api in to ${logSafeOrigin(budget.serverUrl)} before loading "${budget.name}"`);
-    await withAuthRetry(() => initApiLoggedIn(config.MCP_BRIDGE_DATA_DIR, login, 'init'));
+  try {
+    if (!isApiLoggedInTo(login)) {
+      logger.info(`[ADAPTER] logging the api in to ${logSafeOrigin(budget.serverUrl)} before loading "${budgetLogName(budget)}"`);
+      await withAuthRetry(() => initApiLoggedIn(config.MCP_BRIDGE_DATA_DIR, login, 'init'));
+    }
+    await loadBudgetTracked(budget.syncId, budget.encryptionPassword);
+  } finally {
+    // #799: a budget load changes what every listing means; a drain can span budgets. In a
+    // finally so a failed or abandoned load (loaded budget unknown) drops the cache too.
+    invalidateDrainListing('accounts', 'categories', 'categoryGroups', 'payees');
   }
-  await loadBudgetTracked(budget.syncId, budget.encryptionPassword);
 }
 
 
@@ -434,7 +593,7 @@ function _affinityBudget(): string | undefined {
  * session. The operation would do exactly that anyway a moment later, so this only moves it.
  */
 export function resolveBatchBudget(
-  entries: Array<{ requestStore?: { sessionId?: string; allowedBudgets?: string[]; principal?: string } }>,
+  entries: Array<{ requestStore?: RequestStore }>,
 ): string | undefined {
   const budgets = new Set<string | undefined>(
     entries.map((e) => {
@@ -595,7 +754,9 @@ function _enforceBudgetAcl(toolName?: string): void {
   if (!allowedBudgets) return;
 
   const target = getActiveBudgetConfig();
-  if (!allowedBudgets.includes(target.syncId)) {
+  if (!allowedBudgets.includes(target.syncId) ||
+      (config.AUTH_BUDGET_DISCOVERY && requestContext.getStore()?.discoveredBudgets &&
+       !requestBudgets().some(entry => entry.syncId === target.syncId))) {
     logger.warn(
       JSON.stringify({
         event: 'acl_denied',
@@ -609,10 +770,7 @@ function _enforceBudgetAcl(toolName?: string): void {
     // #570: the name and syncId stay in the log above, never in the caller-facing
     // text. With no selection the active budget is the registry's first entry, so
     // naming it told a principal allowed only another budget what the default was.
-    throw new Error(
-      "Budget ACL: the active budget is not in this session's allowedBudgets. " +
-        'Call actual_budgets_list_available and switch to a permitted budget.',
-    );
+    throw activeBudgetRefusal();
   }
 }
 
@@ -804,7 +962,8 @@ export async function withActualApiWrite<T>(operation: () => Promise<T>): Promis
         // #390: verify the singleton holds THIS session's budget before the operation runs.
         // Inside the lock, so no other session can change it in between.
         await ensureLoadedBudgetMatchesSession();
-        const result = await withOpTimeout(operation);
+        // #800: a write, so a callback that outlives the bound must not write later.
+        const result = await runAbandonable(operation);
         // Propagate the write to the server so other clients (and our next
         // read) see it. Pre-#134 this happened implicitly via api.shutdown().
         try {
@@ -844,7 +1003,7 @@ export async function withActualApiWrite<T>(operation: () => Promise<T>): Promis
     let forceFullShutdown = false;
     try {
       await initActualApiForOperation();
-      return await withOpTimeout(operation);
+      return await runAbandonable(operation);
     } catch (err) {
       // #419: force a full teardown on an infrastructure-level error so the next
       // stdio op re-inits fresh (see the read-path catch for the rationale).
@@ -967,7 +1126,7 @@ async function initActualApiForOperation(): Promise<void> {
     const budget = getActiveBudgetConfig();
     const DATA_DIR = config.MCP_BRIDGE_DATA_DIR;
 
-    logger.debug(`[ADAPTER] Initializing Actual API for operation (budget: "${budget.name}", server: ${logSafeOrigin(budget.serverUrl)})`);
+    logger.debug(`[ADAPTER] Initializing Actual API for operation (budget: "${budgetLogName(budget)}", server: ${logSafeOrigin(budget.serverUrl)})`);
 
     // Wrap api.init in auth-rate-limit retry so a transient too-many-requests
     // doesn't surface to the caller (and doesn't trigger #132's crash path).
@@ -1089,7 +1248,7 @@ interface WriteOperation<T> {
   // for the budget precondition, because getActiveBudgetConfig also consults `principal` for
   // the #189 preference restore and `allowedBudgets` for the ACL. The drain re-enters this
   // context per operation so each op resolves ITS OWN budget.
-  requestStore?: { sessionId?: string; allowedBudgets?: string[]; principal?: string };
+  requestStore?: RequestStore;
   // #378: entity listings this operation CANNOT change. Anything not named here is dropped
   // from the drain cache once the operation completes. The default (undefined) therefore
   // invalidates everything, which is the fail-safe direction: forgetting to annotate a new
@@ -1573,7 +1732,9 @@ async function processWriteQueue() {
               // acquiring the mutex (#392), and the `finally` below touches every session in the
               // batch before the lock is released. A sweep that queued behind this drain therefore
               // finds the entry fresh and returns without evicting.
-              return await withOpTimeout(operation, 'operation', timeoutMs);
+              // #800: runAbandonable, not withOpTimeout: once this entry loses the race its callback
+              // may still be awaiting a read, and must not write after the next entry has started.
+              return await runAbandonable(operation, 'operation', timeoutMs);
             });
             resolve(result);
           } catch (error) {
@@ -1899,7 +2060,9 @@ export const notifications = new EventEmitter();
 // Extracted to ./actual-adapter/normalize.ts (#166). Imported for internal use
 // and re-exported so the public surface and external importers are unchanged.
 import { normalizeToTransactionArray, normalizeToId, normalizeImportResult } from './actual-adapter/normalize.js';
-import { isEntityId, matchByName, resolvedNameDetail, FILTER_ID_ENTITIES } from './actual-adapter/filter-ids.js';
+import { assertPayeeFields, assertPayeeNamesUnambiguous, payeeNamesToResolve, resolvePayeeName } from './actual-adapter/payee-fields.js';
+import type { PayeeListingRow } from './actual-adapter/payee-fields.js';
+import { ambiguousNameRefusal, isEntityId, matchesByName, resolvedNameDetail, FILTER_ID_ENTITIES } from './actual-adapter/filter-ids.js';
 import type { FilterIdKind, NamedRow } from './actual-adapter/filter-ids.js';
 import type {
   FinancialAnalysisSnapshot,
@@ -1912,6 +2075,121 @@ import type {
 export { normalizeToTransactionArray, normalizeToId, normalizeImportResult };
 // ---------------------------------------------------------------------------
 
+/**
+ * #359 / #744: refuse an account id that does not exist. Upstream never validates the account
+ * on add, update or import: `addTransactions` (loot-core/src/server/accounts/sync.ts) takes
+ * acctId, normalises, runs rules and inserts, `api/transactions-add` returns 'ok'
+ * unconditionally, `api/transaction-update` merges `{...existing, ...fields}` and
+ * `api/transactions-import` only checks `typeof accountId === 'string'`. Rule evaluation does not
+ * rescue us either (prepareTransactionForRules uses `r._account?.name || ''`). So a bogus account
+ * id produced rows with a dangling `account` column that NO listing tool can return (they all
+ * filter by account), that sync to every other client, and the tool reported success.
+ *
+ * Same guard `createTransfer` has performed since it was written, using the single accounts read
+ * (memoised per drain by readDrainListing, so a batch pays one listing) inside the caller's write
+ * cycle. A CLOSED account is deliberately still allowed: importing history into a closed account
+ * is legitimate, which is why this diverges from createTransfer. It never writes anything.
+ *
+ * Scope: only the account. Payee and category ids (#747), transfer_id (#746), split totals
+ * (#748), a NAME passed as account (#752) and `account: null` (own ticket) are left to other
+ * tickets; a name stays refused as "not found" here. On update the caller must run this BEFORE
+ * any payee creation (#743), so a refusal never leaves a new payee behind.
+ */
+const CREATE_UNKNOWN_ACCOUNT_DETAIL =
+  'No transactions were created: Actual would otherwise have written them against an ' +
+  'account that does not exist, where no tool could retrieve them.';
+const UPDATE_UNKNOWN_ACCOUNT_DETAIL =
+  'The transaction was not changed: Actual would otherwise have moved it to an ' +
+  'account that does not exist, where no tool could retrieve it.';
+const IMPORT_UNKNOWN_ACCOUNT_DETAIL =
+  'No transactions were imported: Actual would otherwise have written them against an ' +
+  'account that does not exist, where no tool could retrieve them.';
+async function assertAccountExists(accountId: string, detail: string): Promise<void> {
+  const accounts = await withConcurrency(() =>
+    retry(() => readDrainListing('accounts', () => rawGetAccounts() as Promise<Array<{ id?: string }>>), { retries: 2, backoffMs: 200 })
+  );
+  if (!(accounts as Array<{ id?: string } | null>).some((a) => a?.id === accountId)) {
+    throw new NotFoundRefusal('Account', accountId, 'actual_accounts_list', detail);
+  }
+}
+/**
+ * #747: refuse a payee or category id that does not exist. Upstream never looks the id up: it is
+ * stored in the payee or category column and every read joins it to nothing, so the row reads
+ * back with a null payee or category while the tool said success. Same shape and place as
+ * assertAccountExists, reading the per-drain payees and categories listings (one read per kind
+ * per drain). A null or absent value reads nothing and a call with nothing to check reads no
+ * listing. Hidden categories and transfer payees exist; tombstoned payees and category GROUP ids
+ * do not. The list tool names are the legacy adapter names so the compact surface rewrites them.
+ * On update the caller must run this BEFORE any payee_name resolution, so a refusal never leaves
+ * a new payee behind. `payee_name` never reaches it. Order of checks: payee, category, then child
+ * categories, so the first miss in that order is the one named.
+ */
+const CREATE_UNKNOWN_REFERENCE_DETAIL =
+  'No transactions were created: Actual would otherwise have stored them with that payee or category empty.';
+/**
+ * #793: on CREATE a payee that is the transfer payee of an account is refused too (same helper,
+ * same payees read, so no extra listing). Upstream's add path defaults runTransfers to false, so
+ * such a row would land with no transfer_id and no mirror row in the other account: half a
+ * transfer reported as success. Only a payee id can reach a transfer payee (their name is empty
+ * and payee_name matches by name). Skipped when the caller asks for runTransfers. A rule can still
+ * set a transfer payee after the write; the adapter cannot see that before it happens.
+ */
+const CREATE_TRANSFER_PAYEE_REFUSAL = (payeeId: string): string =>
+  `Payee "${payeeId}" is the transfer payee of an account, so a transaction created with it would write one side of a transfer only. ` +
+  'Nothing was written. To move money between accounts use actual_transfers_create; for an ordinary payment pass another payee or payee_name.';
+const UPDATE_UNKNOWN_REFERENCE_DETAIL =
+  'The transaction was not changed: Actual would otherwise have saved it with that payee or category empty.';
+async function assertTransactionReferencesExist(
+  input: { payee?: unknown; category?: unknown; subtransactions?: unknown } | null | undefined,
+  detail: string,
+  refuseTransferPayee = false,
+): Promise<void> {
+  if (!input || typeof input !== 'object') return;
+  const payeeId = typeof input.payee === 'string' ? input.payee : undefined;
+  const categoryIds: string[] = [];
+  if (typeof input.category === 'string') categoryIds.push(input.category);
+  if (Array.isArray(input.subtransactions)) {
+    for (const child of input.subtransactions as Array<{ category?: unknown } | null>) {
+      if (typeof child?.category === 'string') categoryIds.push(child.category);
+    }
+  }
+  if (payeeId !== undefined) {
+    const payees = await withConcurrency(() =>
+      retry(() => readDrainListing('payees', () => rawGetPayees() as Promise<PayeeListingRow[]>), { retries: 2, backoffMs: 200 })
+    );
+    const row = (Array.isArray(payees) ? payees : []).find((p) => !(p as { tombstone?: boolean } | null)?.tombstone && p?.id === payeeId);
+    if (!row) throw new NotFoundRefusal('Payee', payeeId, 'actual_payees_get', detail);
+    if (refuseTransferPayee && row.transfer_acct) {
+      const echo = payeeId.slice(0, 80);
+      throw new OutOfRangeRefusal(CREATE_TRANSFER_PAYEE_REFUSAL(echo), echo);
+    }
+  }
+  if (categoryIds.length > 0) {
+    const categories = await withConcurrency(() =>
+      retry(() => readDrainListing('categories', () => rawGetCategories() as Promise<Array<{ id?: string }>>), { retries: 2, backoffMs: 200 })
+    );
+    const known = new Set((Array.isArray(categories) ? categories : []).map((c) => c?.id));
+    for (const id of categoryIds) {
+      if (!known.has(id)) throw new NotFoundRefusal('Category', id, 'actual_categories_get', detail);
+    }
+  }
+}
+/**
+ * #752: refuse a `payee_name` that two or more payees share, on create and import. Upstream's
+ * `normalizeTransactions` resolves a name through `getPayeeByName`, the first row of an
+ * unordered SELECT, so the row would be attached to an arbitrary one of them while the tool said
+ * success. Runs inside the caller's queueWriteOperation (never its own session), after the
+ * account guard and before the raw write. A call with no row to resolve reads no listing; a
+ * batch reads the payees once (readDrainListing). Pure half: payee-fields.ts.
+ */
+async function assertPayeeNamesUnambiguousInDrain(rows: unknown): Promise<void> {
+  const names = payeeNamesToResolve(rows);
+  if (names.length === 0) return;
+  const listing = await withConcurrency(() =>
+    retry(() => readDrainListing('payees', () => rawGetPayees() as Promise<PayeeListingRow[]>), { retries: 2, backoffMs: 200 })
+  );
+  assertPayeeNamesUnambiguous(names, Array.isArray(listing) ? listing : []);
+}
 export async function getAccounts(): Promise<components['schemas']['Account'][]> {
   return withActualApi(async () => {
     observability.incrementToolCall('actual.accounts.list').catch(() => {});
@@ -1943,33 +2221,12 @@ export async function addTransactions(txs: components['schemas']['TransactionInp
       throw new Error('Transaction must include account or accountId');
     }
 
-    // #359: upstream never validates the account. `addTransactions`
-    // (loot-core/src/server/accounts/sync.ts) takes acctId, normalises, runs rules and
-    // inserts, and `api/transactions-add` returns the string 'ok' unconditionally. Rule
-    // evaluation does not rescue us either: prepareTransactionForRules resolves the
-    // account with `r._account?.name || ''`. So a bogus account id produced rows with a
-    // dangling `account` column that NO listing tool can return (they all filter by
-    // account), that sync to every other client, and the tool reported success.
-    //
-    // This is the same guard `createTransfer` has performed since it was written, using
-    // the same single accounts read inside the same write cycle. A CLOSED account is
-    // deliberately still allowed: importing history into a closed account is legitimate,
-    // which is why this diverges from createTransfer, where a closed account would be an
-    // odd transfer destination.
-    const accounts = await withConcurrency(() =>
-      retry(() => readDrainListing('accounts', () => rawGetAccounts() as Promise<Array<{ id: string; name?: string }>>), { retries: 2, backoffMs: 200 })
-    );
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const accountExists = (accounts as any[]).some((a: any) => a?.id === accountId);
-    if (!accountExists) {
-      throw new NotFoundRefusal(
-        'Account',
-        accountId,
-        'actual_accounts_list',
-        'No transactions were created: Actual would otherwise have written them against an ' +
-          'account that does not exist, where no tool could retrieve them.',
-      );
-    }
+    // #359: the account must exist (see assertAccountExists for the rationale).
+    await assertAccountExists(accountId, CREATE_UNKNOWN_ACCOUNT_DETAIL);
+    // #747: an unknown payee or category id (also on a child) is refused before anything is written.
+    for (const t of txArray) await assertTransactionReferencesExist(t as any, CREATE_UNKNOWN_REFERENCE_DETAIL, options.runTransfers !== true);
+    // #752: a payee_name shared by two payees is refused (nothing is written).
+    await assertPayeeNamesUnambiguousInDrain(txArray);
 
     // Remove account/accountId from transaction objects as they're passed separately
     const cleanedTxs = txArray.map(tx => {
@@ -2003,6 +2260,11 @@ export async function addTransactions(txs: components['schemas']['TransactionInp
 export async function importTransactions(accountId: string | undefined, txs: components['schemas']['TransactionInput'][] | unknown) : Promise<{ added?: string[]; updated?: string[]; errors?: string[] }>{
   observability.incrementToolCall('actual.transactions.import').catch(() => {});
   return queueWriteOperation(async () => {
+    // #744: an unknown account is refused before anything is written. An undefined id is left
+    // to upstream's own `accountId must be an id` error.
+    if (typeof accountId === 'string') await assertAccountExists(accountId, IMPORT_UNKNOWN_ACCOUNT_DETAIL);
+    // #752: a payee_name shared by two payees is refused for the whole batch.
+    await assertPayeeNamesUnambiguousInDrain(txs);
     const raw = await withConcurrency(() => retry(() => rawImportTransactions(accountId, txs) as Promise<{ added?: string[]; updated?: string[]; errors?: string[] }>, { retries: 2, backoffMs: 200, isRetryable: isRetryableError }));
     return raw || { added: [], updated: [], errors: [] };
   });
@@ -2093,11 +2355,40 @@ export async function getCategories(): Promise<components['schemas']['Category']
     return await withConcurrency(() => retry(() => rawGetCategories() as Promise<components['schemas']['Category'][]>, { retries: 2, backoffMs: 200 }));
   });
 }
+/**
+ * #763: a category whose group is unknown is written with a null group, which no tool can list,
+ * update, delete or annotate afterwards. Refuse it. The listing is the per-drain category group
+ * one (hidden groups included, deleted ones excluded), so a group created earlier in the same
+ * drain is visible. Call it inside the queued write, before the raw call.
+ */
+async function assertCategoryGroupExists(groupId: string): Promise<{ id: string; name?: string; is_income?: boolean }> {
+  const groups = await withConcurrency(() =>
+    retry(() => readDrainListing('categoryGroups', () => rawGetCategoryGroups() as Promise<Array<{ id?: string; name?: string; is_income?: boolean }>>), { retries: 2, backoffMs: 200 })
+  );
+  const found = Array.isArray(groups) ? groups.find((g) => g?.id === groupId) : undefined;
+  if (!found) {
+    throw new NotFoundRefusal('Category group', groupId, 'actual_category_groups_get');
+  }
+  return { ...found, id: groupId };
+}
 export async function createCategory(category: components['schemas']['Category'] | unknown): Promise<string> {
   observability.incrementToolCall('actual.categories.create').catch(() => {});
   return queueWriteOperation(async () => {
+    const groupId = (category as { group_id?: unknown } | null)?.group_id;
+    let toCreate: unknown = category;
+    if (typeof groupId === 'string') {
+      // #764: a category takes its group's is_income; an explicit value that contradicts the group is refused.
+      const group = await assertCategoryGroupExists(groupId);
+      const groupFlag = Boolean(group.is_income);
+      const given = (category as { is_income?: unknown }).is_income;
+      if (given === undefined || given === null) {
+        toCreate = { ...(category as object), is_income: groupFlag };
+      } else if (Boolean(given) !== groupFlag) {
+        throw new ConflictRefusal(`Category is_income (${Boolean(given)}) contradicts its group "${group.name ?? groupId}" (is_income ${groupFlag}). Nothing was written.`);
+      }
+    }
     try {
-      const raw = await withConcurrency(() => retry(() => rawCreateCategory(category) as Promise<string | { id?: string }>, { retries: 0, backoffMs: 200, isRetryable: isRetryableError }));
+      const raw = await withConcurrency(() => retry(() => rawCreateCategory(toCreate) as Promise<string | { id?: string }>, { retries: 0, backoffMs: 200, isRetryable: isRetryableError }));
       return normalizeToId(raw);
     } catch (error) {
       // Upstream's message quotes the category name (#559), so the log gets the class only.
@@ -2287,9 +2578,17 @@ export async function resolveFilterId(
     throw new NotFoundRefusal(entity, value, listTool);
   }
 
-  const hit = matchByName(rows, value);
-  if (hit && typeof hit.id === 'string') {
-    const resolved = resolvedNameDetail(kind, String(hit.name), hit.id);
+  const hits = matchesByName(rows, value).filter((r) => typeof r.id === 'string');
+  if (hits.length > 1) {
+    // #801: Actual lets two rows share a name, so a name is not a key. Taking the first would
+    // point the caller at one of them as if it were the only one. OutOfRangeRefusal, not a new
+    // class: the candidates are text, not structure (same call as switchBudget and #752). The
+    // listing rows carry no detail, so only the ids are named.
+    throw ambiguousNameRefusal(entity.toLowerCase(), value.trim(), hits.map((r) => ({ id: String(r.id) })));
+  }
+  const hit = hits[0];
+  if (hit) {
+    const resolved = resolvedNameDetail(kind, String(hit.name), String(hit.id));
     throw new NotFoundRefusal(entity, value, listTool, undefined, resolved);
   }
   throw new NotFoundRefusal(entity, value, listTool);
@@ -2304,9 +2603,68 @@ export async function getCommonPayees(): Promise<any[]> {
 export async function createPayee(payee: components['schemas']['Payee'] | unknown): Promise<string> {
   observability.incrementToolCall('actual.payees.create').catch(() => {});
   return queueWriteOperation(async () => {
-    const raw = await withConcurrency(() => retry(() => rawCreatePayee(payee) as Promise<string | { id?: string }>, { retries: 2, backoffMs: 200, isRetryable: isRetryableError }));
-    return normalizeToId(raw);
+    const opStartedAt = Date.now();
+    // #765: upstream api/payee-create passes only `{ name }` on, so `notes` was dropped while
+    // the call reported an id. Strip it here and store it as the payee's note (a row of the
+    // notes table keyed by the payee id) after the create, inside this same operation. The
+    // adapter's own updateNote opens its own queued operation, so it must NOT be called from
+    // here (a nested session deadlocks); the raw binding is used instead.
+    const isObj = payee !== null && typeof payee === 'object';
+    const { notes, ...rest } = (isObj ? payee : {}) as Record<string, unknown>;
+    const toCreate = isObj ? rest : payee;
+    const raw = await withConcurrency(() => retry(() => rawCreatePayee(toCreate) as Promise<string | { id?: string }>, { retries: 2, backoffMs: 200, isRetryable: isRetryableError }));
+    const id = normalizeToId(raw);
+    if (typeof notes === 'string' && notes !== '') {
+      await storePayeeNote(id, String(rest.name ?? ''), notes, opStartedAt);
+    }
+    return id;
   });
+}
+
+/**
+ * #765: write a payee's note right after the create and read it back. The read sits INSIDE the
+ * drain, before its closing api.sync(), so it polls (the #493 measurement; a later tool call
+ * needs none). The poll ends before the op timeout does, like the split poll (#494). A failure
+ * is a plain Error that says the payee EXISTS, so the caller does not create it again; the
+ * payee is not deleted (a rollback is a third write that can fail too). Every message avoids the
+ * TRANSIENT_ERROR_PATTERNS substrings ("timed out" included), or the pool drops the session's
+ * connection; upstream causes stay in `cause`.
+ */
+async function storePayeeNote(id: string, name: string, notes: string, opStartedAt: number): Promise<void> {
+  const failed = (what: string, err?: unknown) =>
+    new Error(`Payee "${name}" was created (id ${id}) but its notes could not be stored (${what}), so it has no note. The payee exists: set the note with actual_notes_update, or delete the payee. Nothing else was changed.`, err === undefined ? undefined : { cause: err });
+  const T = config.ACTUAL_OP_TIMEOUT_MS;
+  const deadline = T > 0
+    ? Math.min(Date.now() + SPLIT_VERIFY_TIMEOUT_MS, opStartedAt + Math.floor(T / 2))
+    : Date.now() + SPLIT_VERIFY_TIMEOUT_MS;
+  // A raw call that never answers must not hand the caller the generic op-timeout error, which
+  // omits the created id: bound each one by the deadline and report the payee instead.
+  const STALLED = Symbol('stalled');
+  const bounded = async <R>(work: () => Promise<R>): Promise<R> => {
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      return await Promise.race([
+        work(),
+        new Promise<never>((_, reject) => { timer = setTimeout(() => reject(STALLED), Math.max(0, deadline - Date.now())); }),
+      ]);
+    } finally { clearTimeout(timer); }
+  };
+  try {
+    await bounded(() => withConcurrency(() => retry(() => rawUpdateNote(id, notes) as Promise<void>, { retries: 0, backoffMs: 200, isRetryable: isRetryableError })));
+  } catch (err) {
+    throw failed(err === STALLED ? 'the note write did not answer in time' : 'the note write failed', err === STALLED ? undefined : err);
+  }
+  for (;;) {
+    let current: { note?: string } | null | undefined;
+    try {
+      current = await bounded(() => withConcurrency(() => retry(() => rawGetNote(id) as Promise<{ id: string; note: string } | null>, { retries: 2, backoffMs: 200 })));
+    } catch (err) {
+      throw failed(err === STALLED ? 'the read-back did not answer in time' : 'the note could not be read back', err === STALLED ? undefined : err);
+    }
+    if (current?.note === notes) return;
+    if (Date.now() >= deadline) throw failed('the note was not visible on read-back');
+    await new Promise((resolve) => setTimeout(resolve, SPLIT_VERIFY_INTERVAL_MS));
+  }
 }
 export async function getBudgetMonths(): Promise<string[]> {
   return withActualApi(async () => {
@@ -2332,7 +2690,7 @@ export async function setBudgetAmount(month: string | undefined, categoryId: str
     );
     const exists = (categories as any[]).some((c: any) => c.id === categoryId);
     if (!exists) {
-      // #377: MUST be a typed refusal. `budgets_setAmount` is one of the two tools whose
+      // #377: MUST be a typed refusal. `budgets_set_amount` is one of the two tools whose
       // published contract is the SHAPE (#89: an unknown category returns
       // { success: false, error }, it does not throw), and the tool decides that by type
       // now. Leaving this as a bare Error silently undid #89, and the unit test did not
@@ -2357,9 +2715,20 @@ export async function setBudgetAmount(month: string | undefined, categoryId: str
     if (Array.isArray(months) && months.length > 0 && !months.includes(String(month))) {
       throw new OutOfRangeRefusal(
         `Month "${month}" is outside this budget's range, which runs from ${months[0]} to ` +
-          `${months[months.length - 1]}. Use actual_budgets_getMonths to see the months you can budget to.`,
+          `${months[months.length - 1]}. Use actual_budgets_get_months to see the months you can budget to.`,
         String(month),
       );
+    }
+
+    // #759: on an envelope budget upstream builds no budget cell for an income category, so the
+    // row this write would INSERT is one nothing reads. A tracking budget does read it, so the
+    // refusal depends on the budget type, seen from the month (only paid for an income category).
+    const target = (categories as any[]).find((c: any) => c.id === categoryId);
+    if (target?.is_income) {
+      const budgetMonth = await withConcurrency(() =>
+        retry(() => rawGetBudgetMonth(month) as Promise<unknown>, { retries: 2, backoffMs: 200, isRetryable: isRetryableError })
+      );
+      if (!isTrackingBudgetMonth(budgetMonth)) throw incomeSetAmountRefusal(target);
     }
 
     const result = await withConcurrency(() => retry(() => rawSetBudgetAmount(month, categoryId, amount) as Promise<components['schemas']['BudgetSetRequest'] | null | void>, { retries: 2, backoffMs: 200, isRetryable: isRetryableError }));
@@ -2434,8 +2803,21 @@ export async function transferBudgetAmount(
     const to = cats.find((c: any) => c.id === toCategoryId);
     if (!from) throw new Error(`Source category ${fromCategoryId} not found in budget`);
     if (!to) throw new Error(`Target category ${toCategoryId} not found in budget`);
+    // #759: a transfer moves budgeted money between expense categories. An income category has
+    // no budgeted amount on an envelope budget (it reads as 0, and the target write would create
+    // a row nothing reads while "to budget" rises), and no to-budget pool exists on a tracking one.
+    if (from.is_income) throw incomeTransferRefusal(from);
+    if (to.is_income) throw incomeTransferRefusal(to);
     const prevFrom = from.budgeted || 0;
     const prevTo = to.budgeted || 0;
+    // The target is written AFTER the source is lowered, and upstream cannot store above
+    // MAX_BUDGET_AMOUNT_CENTS, so refuse here, before the first write, not as a partial transfer.
+    if (prevTo + amount > MAX_BUDGET_AMOUNT_CENTS) {
+      throw new OutOfRangeRefusal(
+        `Transfer of ${amount} would set category "${toCategoryId}" above Actual's limit of ${MAX_BUDGET_AMOUNT_CENTS}. Nothing was written.`,
+        String(toCategoryId),
+      );
+    }
     if (prevFrom < amount) {
       throw new Error(`Insufficient budget in source category. Available: ${prevFrom}, Requested: ${amount}`);
     }
@@ -2444,7 +2826,7 @@ export async function transferBudgetAmount(
     // reason about, and the client re-reads instead.
     await withConcurrency(() => rawSetBudgetAmount(month, fromCategoryId, prevFrom - amount) as Promise<void>);
     const sourceDone = `Partial transfer: the source category ${fromCategoryId} was set from ${prevFrom} to ${prevFrom - amount}`;
-    const readBack = 'Read back with actual_budgets_getMonth before retrying.';
+    const readBack = 'Read back with actual_budgets_get_month before retrying.';
     const deadlineMs = config.ACTUAL_OP_TIMEOUT_MS > 0 ? config.ACTUAL_OP_TIMEOUT_MS * BUDGET_BATCH_DEADLINE_FRACTION : 0;
     if (deadlineMs > 0 && Date.now() - startedAt > deadlineMs) {
       throw new Error(
@@ -2506,6 +2888,15 @@ export async function updateAccount(id: string, fields: Partial<components['sche
     if (!(Array.isArray(accounts) && accounts.some((a) => a?.id === id))) {
       throw new NotFoundRefusal('Account', id, 'actual_accounts_list');
     }
+    // #816: an unknown group id would be written as a dangling reference. The groups are another
+    // listing from the accounts, so read them here, in the same cycle; null ungroups and needs no read.
+    const groupId = (fields as { account_group_id?: unknown } | null | undefined)?.account_group_id;
+    if (typeof groupId === 'string') {
+      const groups = await withConcurrency(() => retry(() => rawGetAccountGroups() as Promise<Array<{ id?: string }>>, { retries: 2, backoffMs: 200 }));
+      if (!(Array.isArray(groups) && groups.some((g) => g?.id === groupId))) {
+        throw new NotFoundRefusal('Account group', groupId, 'actual_account_groups_list');
+      }
+    }
     await withConcurrency(() => retry(() => rawUpdateAccount(id, fields) as Promise<void | null>, { retries: 2, backoffMs: 200, isRetryable: isRetryableError }));
     return null;
   });
@@ -2538,12 +2929,119 @@ export async function getAccountsWithBalances(): Promise<(components['schemas'][
     return result;
   });
 }
-export async function deleteAccount(id: string): Promise<void> {
+/**
+ * #768: upstream deletes the account's rows and, for each transfer row, unlinks the counterpart in
+ * the other account (payee and transfer_id set to null). The caller is told how many, counted in
+ * the same write cycle just before the delete. `splits: 'all'` because a split child can carry a
+ * transfer.
+ */
+export async function deleteAccount(id: string): Promise<{ detachedTransfers: number }> {
   observability.incrementToolCall('actual.accounts.delete').catch(() => {});
   return queueWriteOperation(async () => {
+    const { q } = (await import('@actual-app/api')) as any; // eslint-disable-line @typescript-eslint/no-explicit-any
+    const res = (await withConcurrency(() =>
+      retry(() => rawRunQuery(q('transactions').options({ splits: 'all' }).filter({ account: id, transfer_id: { $ne: null } }).select(['id'])) as Promise<{ data?: unknown }>, { retries: 2, backoffMs: 200 })
+    ));
+    const detachedTransfers = Array.isArray(res?.data) ? res.data.length : 0;
     // Non-idempotent: do not retry (#165).
-    await withConcurrency(() => retry(() => rawDeleteAccount(id) as Promise<void>, { retries: 0, backoffMs: 200 }));
+    try {
+      await withConcurrency(() => retry(() => rawDeleteAccount(id) as Promise<void>, { retries: 0, backoffMs: 200 }));
+    } catch (err: unknown) {
+      // #771: upstream throws the bare `Account with ID <id> not found.` for an id that never
+      // existed. No pre-check: the listing hides a tombstoned (closed-then-removed) account that
+      // upstream still deletes, so only a FAILED delete is followed by one fresh read. The read
+      // decides, never the message text; if the id is present or the read fails, the original
+      // error is rethrown unchanged.
+      // Accepted: a delete that fails for another reason (timeout, sync error) on an id that is
+      // already tombstoned is also absent from the listing and reads as not found. A listing
+      // pre-check would instead refuse the close-then-delete teardown, which is worse (#771 review).
+      let rows: Array<{ id?: string }> | null = null;
+      try {
+        rows = (await withConcurrency(() => retry(() => rawGetAccounts() as Promise<Array<{ id?: string }>>, { retries: 2, backoffMs: 200 }))) as Array<{ id?: string }>;
+      } catch {
+        rows = null;
+      }
+      if (Array.isArray(rows) && !rows.some((a) => a?.id === id)) throw new NotFoundRefusal('Account', id, 'actual_accounts_list');
+      throw err;
+    }
+    return { detachedTransfers };
   });
+}
+/**
+ * #743: replace `payee_name` in an update payload with the id of the payee it names, creating the
+ * payee when none matches. Runs inside the caller's queueWriteOperation (never nested) and must be
+ * the LAST step before `rawUpdateTransaction`, so a refusal never leaves a created payee behind.
+ * If the update itself then fails, a newly created payee remains (an orphan Actual can offer to
+ * remove); accepted. `listing` lets a batch read the payees once and see its own creations.
+ */
+async function resolvePayeeNameInPayload<P>(payload: P, listing?: PayeeListingRow[]): Promise<P> {
+  const f = payload as { payee_name?: unknown } | null;
+  if (!f || typeof f !== 'object' || typeof f.payee_name !== 'string') return payload;
+  const rows = listing ?? await withConcurrency(() =>
+    retry(() => readDrainListing('payees', () => rawGetPayees() as Promise<PayeeListingRow[]>), { retries: 2, backoffMs: 200 })
+  );
+  const hit = resolvePayeeName(f.payee_name, rows);
+  let id: string;
+  if ('id' in hit) {
+    id = hit.id;
+  } else {
+    // Non-idempotent: do not retry (#165).
+    const raw = await withConcurrency(() => retry(() => rawCreatePayee({ name: hit.create }) as Promise<string | { id?: string }>, { retries: 0, backoffMs: 200, isRetryable: isRetryableError }));
+    id = normalizeToId(raw);
+    invalidateDrainListing('payees');
+    if (listing) listing.push({ id, name: hit.create });
+  }
+  const { payee_name: _dropped, ...rest } = f as Record<string, unknown>;
+  return { ...rest, payee: id } as P;
+}
+/**
+ * #748: upstream recomputes a split instead of refusing, so a write that leaves the children
+ * not summing to the parent lands and marks the parent with a SplitTransactionError. These
+ * helpers decide, from one family read (the parent plus its children), whether a write keeps
+ * the total valid. Sums are compared, not "any amount change refused", so a parent already in
+ * error can be repaired. Shared by updateTransaction, updateTransactionBatch and deleteTransaction
+ * so the paths cannot drift. Always called inside the caller's queueWriteOperation (no nesting).
+ */
+type SplitFamily = { parentAmount: number | undefined; children: Array<{ id: string; amount: number }> };
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function readSplitFamily(q: any, parentId: string, written?: ReadonlyMap<string, number>): Promise<SplitFamily> {
+  const data = await withConcurrency(() =>
+    retry(async () => {
+      const res = (await rawRunQuery(
+        q('transactions').options({ splits: 'all' })
+          .filter({ $or: [{ id: parentId }, { parent_id: parentId }] })
+          .select(['id', 'amount', 'parent_id'])
+      )) as { data?: Array<{ id: string; amount?: number; parent_id?: string | null }> };
+      return Array.isArray(res?.data) ? res.data : [];
+    }, { retries: 2, backoffMs: 200 })
+  );
+  // `written`: amounts this batch already sent, which a read may not show yet (raw writes land late).
+  const amountOf = (r: { id: string; amount?: number }) => written?.get(r.id) ?? r.amount;
+  return {
+    parentAmount: amountOf({ id: parentId, amount: data.find((r) => r.id === parentId)?.amount }),
+    children: data.filter((r) => r.id !== parentId && r.parent_id === parentId).map((r) => ({ id: r.id, amount: amountOf(r) ?? 0 })),
+  };
+}
+type SplitMemberRow = { is_parent?: boolean; is_child?: boolean; amount?: number; parent_id?: string | null };
+/** Refusal message when setting `fields.amount` on this row would unbalance its split, else null. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function splitAmountRefusal(q: any, id: string, row: SplitMemberRow, fields: unknown, written?: ReadonlyMap<string, number>): Promise<string | null> {
+  const newAmount = (fields as { amount?: unknown } | null)?.amount;
+  if (typeof newAmount !== 'number' || newAmount === row.amount) return null;
+  if (row.is_parent === true) {
+    const { children } = await readSplitFamily(q, id, written);
+    const childSum = children.reduce((a, c) => a + c.amount, 0);
+    if (childSum === newAmount) return null;
+    return `Transaction "${id}" is a split parent: its children sum to ${childSum}, so its amount cannot become ${newAmount} on its own. ${written ? `Use actual_transactions_update with subtransactions that sum to ${newAmount} for this split.` : `Send subtransactions that sum to ${newAmount} in the same update.`}`;
+  }
+  if (row.is_child === true && typeof row.parent_id === 'string') {
+    const { parentAmount, children } = await readSplitFamily(q, row.parent_id, written);
+    if (parentAmount === undefined) return null;
+    const newSum = children.filter((c) => c.id !== id).reduce((a, c) => a + c.amount, 0) + newAmount;
+    if (newSum === parentAmount) return null;
+    return `Transaction "${id}" is a split child of "${row.parent_id}": changing its amount to ${newAmount} would make the children sum to ${newSum}, not the parent's ${parentAmount}. Edit the parent with subtransactions that sum to its amount.`;
+  }
+  return null;
 }
 export async function updateTransaction(
   id: string,
@@ -2571,8 +3069,8 @@ export async function updateTransaction(
         // regular transactions, split parents, and split children as flat rows, so
         // the existence + is_parent + amount read is correct for every kind.
         const res = (await rawRunQuery(
-          q('transactions').options({ splits: 'all' }).filter({ id }).select(['id', 'is_parent', 'is_child', 'amount', 'category'])
-        )) as { data?: Array<{ id: string; is_parent?: boolean; is_child?: boolean; amount?: number; category?: string | null }> };
+          q('transactions').options({ splits: 'all' }).filter({ id }).select(['id', 'is_parent', 'is_child', 'amount', 'category', 'parent_id'])
+        )) as { data?: Array<{ id: string; is_parent?: boolean; is_child?: boolean; amount?: number; category?: string | null; parent_id?: string | null }> };
         return Array.isArray(res?.data) ? res.data : [];
       }, { retries: 2, backoffMs: 200 })
     );
@@ -2581,6 +3079,14 @@ export async function updateTransaction(
       throw new NotFoundRefusal('Transaction', id, 'actual_transactions_get', undefined,
         `Transaction "${id}" not found. Use actual_transactions_get to list transactions.`);
     }
+    // #743: refuse bad payee input before any other work (pure, read-free).
+    assertPayeeFields(fields);
+    // #744: an unknown account is refused here, BEFORE resolvePayeeNameInPayload can create a payee.
+    // `account: null` or absent reads nothing.
+    const targetAccount = (fields as { account?: unknown } | null)?.account;
+    if (typeof targetAccount === 'string') await assertAccountExists(targetAccount, UPDATE_UNKNOWN_ACCOUNT_DETAIL);
+    // #747: an unknown payee or category id is refused here, before the split guards and any payee_name creation.
+    await assertTransactionReferencesExist(fields as any, UPDATE_UNKNOWN_REFERENCE_DETAIL);
 
     // Split guards, BEFORE the raw write:
     //   (a) a CHILD cannot itself be split: upstream nests one level only.
@@ -2616,6 +3122,14 @@ export async function updateTransaction(
       }
     }
 
+    // #748: an amount change on a split member that leaves the children not summing to the parent is
+    // refused (upstream would record a SplitTransactionError). After the account, payee and category
+    // checks, BEFORE resolvePayeeNameInPayload can create a payee. With `subs` the sum check above rules.
+    if (!subs) {
+      const splitRefusal = await splitAmountRefusal(q, id, row, fields);
+      if (splitRefusal) throw new OutOfRangeRefusal(splitRefusal, id);
+    }
+
     // #489: a converted parent keeps its old category upstream (the update path nulls a parent's
     // category only when `account` is in the diff), while the Actual UI shows a split parent with
     // none. Clear it in the SAME write, and hand its category to every child that names none, so
@@ -2630,6 +3144,8 @@ export async function updateTransaction(
         subtransactions: f.subtransactions.map((c) => ('category' in c ? c : { ...c, category: inherited })),
       };
     }
+    // #743: resolve payee_name LAST (creating a payee), after every refusal above.
+    payload = await resolvePayeeNameInPayload(payload);
     await withConcurrency(() => retry(() => rawUpdateTransaction(id, payload) as Promise<void>, { retries: 0, backoffMs: 200, isRetryable: isRetryableError }));
     if (!converting) return {};
 
@@ -2708,14 +3224,18 @@ export async function updateTransactionBatch(
         // as "not found". Splits themselves stay unsupported in batch (FieldsSchema
         // strips `subtransactions`); this only ensures a split parent's OTHER fields
         // are updatable here.
-        const res = (await rawRunQuery(q('transactions').options({ splits: 'all' }).filter({ id: { $oneof: ids } }).select(['id']))) as { data?: Array<{ id: string }> };
-        return new Set(Array.isArray(res?.data) ? res.data.map((r) => r.id) : []);
+        const res = (await rawRunQuery(q('transactions').options({ splits: 'all' }).filter({ id: { $oneof: ids } }).select(['id', 'is_parent', 'is_child', 'amount', 'parent_id']))) as { data?: Array<{ id: string } & SplitMemberRow> };
+        return new Map((Array.isArray(res?.data) ? res.data : []).map((r) => [r.id, r] as const));
       }, { retries: 2, backoffMs: 200 })
     );
 
     const succeeded: { id: string }[] = [];
     const failed: { id: string; error: string }[] = [];
     const deadlineMs = config.ACTUAL_OP_TIMEOUT_MS > 0 ? config.ACTUAL_OP_TIMEOUT_MS * BUDGET_BATCH_DEADLINE_FRACTION : 0;
+    // #743: payees read lazily, once per batch; creations are pushed so a repeated new name reuses them.
+    let payeeListing: PayeeListingRow[] | undefined;
+    // #748: amounts already sent in this batch, so a repeated id is judged against its current value.
+    const writtenAmounts = new Map<string, number>();
     for (const [position, { id, fields }] of updates.entries()) {
       if (!existing.has(id)) {
         failed.push({ id, error: `Transaction "${id}" not found. Use actual_transactions_get to list transactions.` });
@@ -2726,9 +3246,28 @@ export async function updateTransactionBatch(
         continue;
       }
       try {
+        // #743: a refusal here lands this item in failed[] and the rest proceed.
+        assertPayeeFields(fields);
+        // #744: same for an unknown account (one listing per drain), before any payee creation.
+        const targetAccount = (fields as { account?: unknown } | null)?.account;
+        if (typeof targetAccount === 'string') await assertAccountExists(targetAccount, UPDATE_UNKNOWN_ACCOUNT_DETAIL);
+        // #747: same for an unknown payee or category id, one listing per kind for the batch.
+        await assertTransactionReferencesExist(fields as any, UPDATE_UNKNOWN_REFERENCE_DETAIL);
+        // #748: same split-total rule as updateTransaction, per item (a batch cannot carry subtransactions).
+        const splitRefusal = await splitAmountRefusal(q, id, { ...existing.get(id)!, amount: writtenAmounts.get(id) ?? existing.get(id)!.amount }, fields, writtenAmounts);
+        if (splitRefusal) throw new OutOfRangeRefusal(splitRefusal, id);
+        let payload = fields;
+        if ((fields as { payee_name?: unknown } | null)?.payee_name !== undefined) {
+          payeeListing ??= [...await withConcurrency(() =>
+            retry(() => readDrainListing('payees', () => rawGetPayees() as Promise<PayeeListingRow[]>), { retries: 2, backoffMs: 200 })
+          )];
+          payload = await resolvePayeeNameInPayload(fields, payeeListing);
+        }
         await withConcurrency(() =>
-          retry(() => rawUpdateTransaction(id, fields) as Promise<void>, { retries: 0, backoffMs: 200, isRetryable: isRetryableError })
+          retry(() => rawUpdateTransaction(id, payload) as Promise<void>, { retries: 0, backoffMs: 200, isRetryable: isRetryableError })
         );
+        const sentAmount = (fields as { amount?: unknown } | null)?.amount;
+        if (typeof sentAmount === 'number') writtenAmounts.set(id, sentAmount);
         succeeded.push({ id });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
@@ -2765,12 +3304,26 @@ export async function deleteTransaction(id: string): Promise<void> {
         // so without it a split parent reads as non-existent and this check throws
         // "not found" before the raw delete is ever reached. The effect was that a
         // split could be created through the tools but never deleted through them.
-        const res = (await rawRunQuery(q('transactions').options({ splits: 'all' }).filter({ id }).select(['id']))) as { data?: unknown[] };
-        return Array.isArray(res?.data) && res.data.length > 0;
+        // #748: is_child + parent_id ride the same read for the split-total guard below.
+        const res = (await rawRunQuery(q('transactions').options({ splits: 'all' }).filter({ id }).select(['id', 'is_child', 'parent_id']))) as { data?: Array<{ is_child?: boolean; parent_id?: string | null }> };
+        return Array.isArray(res?.data) && res.data.length > 0 ? res.data[0] : null;
       }, { retries: 2, backoffMs: 200 })
     );
     if (!found) {
       throw new Error(`Transaction "${id}" not found. Use actual_transactions_get to list transactions.`);
+    }
+    // #748: deleting a split child must leave the children summing to the parent. A sole child is
+    // fine (upstream turns the parent back into a plain transaction); deleting a parent is unchanged.
+    if (found.is_child === true && typeof found.parent_id === 'string') {
+      const { parentAmount, children } = await readSplitFamily(q, found.parent_id);
+      const remaining = children.filter((c) => c.id !== id);
+      const remainingSum = remaining.reduce((a, c) => a + c.amount, 0);
+      if (remaining.length > 0 && parentAmount !== undefined && remainingSum !== parentAmount) {
+        throw new OutOfRangeRefusal(
+          `Transaction "${id}" is a split child of "${found.parent_id}": deleting it would leave the children summing to ${remainingSum}, not the parent's ${parentAmount}. Update the parent with the remaining subtransactions, or delete the parent.`,
+          id
+        );
+      }
     }
     // Non-idempotent: do not retry (#165). A retry after a lost-response would
     // re-issue the delete against an already-removed record and surface a
@@ -2795,12 +3348,12 @@ export async function mergeTransactions(ids: [string, string]): Promise<{ keptId
   return queueWriteOperation(async () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const { q } = (await import('@actual-app/api')) as any;
-    type Row = { id: string; account?: string; amount?: number; parent_id?: string | null; is_child?: boolean };
+    type Row = { id: string; account?: string; amount?: number; parent_id?: string | null; is_child?: boolean; transfer_id?: string | null };
     const rows = await withConcurrency(() =>
       retry(async () => {
         // `splits: 'all'` is REQUIRED (#305): the default query excludes split PARENT rows.
         const res = (await rawRunQuery(
-          q('transactions').options({ splits: 'all' }).filter({ id: { $oneof: ids } }).select(['id', 'account', 'amount', 'parent_id', 'is_child'])
+          q('transactions').options({ splits: 'all' }).filter({ id: { $oneof: ids } }).select(['id', 'account', 'amount', 'parent_id', 'is_child', 'transfer_id'])
         )) as { data?: Row[] };
         return Array.isArray(res?.data) ? res.data : [];
       }, { retries: 2, backoffMs: 200 })
@@ -2830,6 +3383,16 @@ export async function mergeTransactions(ids: [string, string]): Promise<{ keptId
         String(second.amount)
       );
     }
+    // #794: two rows that name the SAME counterpart make upstream merge that counterpart with
+    // itself, which deletes it in the other account and leaves the kept row pointing at nothing.
+    // Distinct counterparts are upstream's correct case and stay allowed. A missing, null or empty
+    // transfer_id is never "shared" (undefined === undefined must not count).
+    if (typeof first.transfer_id === 'string' && first.transfer_id !== '' && first.transfer_id === second.transfer_id) {
+      throw new OutOfRangeRefusal(
+        `Cannot merge ${ids[0]} and ${ids[1]}: both point at the same transfer counterpart ${first.transfer_id}, so merging them would delete that counterpart in the other account. Nothing was changed. Use actual_transactions_get to inspect both rows.`,
+        first.transfer_id
+      );
+    }
     // Non-idempotent: do not retry (#165, #514). After a lost response the dropped id is gone, so
     // a retry would be refused or act on the wrong pair.
     const keptId = (await withConcurrency(() => retry(() => rawMergeTransactions(ids) as Promise<string>, { retries: 0, backoffMs: 200 }))) as string;
@@ -2848,10 +3411,31 @@ export async function updateCategory(id: string, fields: Partial<components['sch
     // Called with no argument, upstream returns every category in every group, hidden
     // included, so a hidden category is not misreported as missing.
     const categories = await withConcurrency(() =>
-      retry(() => readDrainListing('categories', () => rawGetCategories() as Promise<Array<{ id?: string }>>), { retries: 2, backoffMs: 200 })
+      retry(() => readDrainListing('categories', () => rawGetCategories() as Promise<Array<{ id?: string; group_id?: string; is_income?: boolean }>>), { retries: 2, backoffMs: 200 })
     );
-    if (!(Array.isArray(categories) && categories.some((c) => c?.id === id))) {
+    const current = Array.isArray(categories) ? categories.find((c) => c?.id === id) : undefined;
+    if (!current) {
       throw new NotFoundRefusal('Category', id, 'actual_categories_get');
+    }
+    const f = (fields ?? {}) as { group_id?: unknown; is_income?: unknown };
+    const groupId = f.group_id;
+    if (typeof groupId === 'string') await assertCategoryGroupExists(groupId);
+    // #764: keep a category's is_income consistent with its group. A rename reads no group.
+    const givenFlag = typeof f.is_income === 'boolean' ? f.is_income : undefined;
+    if (typeof groupId === 'string' || givenFlag !== undefined) {
+      const effectiveId = typeof groupId === 'string' ? groupId : current.group_id;
+      if (typeof effectiveId === 'string') {
+        const group = await assertCategoryGroupExists(effectiveId);
+        const groupFlag = Boolean(group.is_income);
+        const label = group.name ?? effectiveId;
+        if (givenFlag !== undefined) {
+          if (givenFlag !== groupFlag) {
+            throw new ConflictRefusal(`Category is_income (${givenFlag}) contradicts its group "${label}" (is_income ${groupFlag}). Nothing was written.`);
+          }
+        } else if (groupId !== current.group_id && groupFlag !== Boolean(current.is_income)) {
+          throw new ConflictRefusal(`Moving the category to group "${label}" (is_income ${groupFlag}) would contradict its is_income (${Boolean(current.is_income)}). Pass is_income ${groupFlag} together with group_id to change both. Nothing was written.`);
+        }
+      }
     }
     await withConcurrency(() => retry(() => rawUpdateCategory(id, fields) as Promise<void>, { retries: 2, backoffMs: 200, isRetryable: isRetryableError }));
   });
@@ -2872,8 +3456,49 @@ export async function deleteCategory(id: string): Promise<void> {
     );
   });
 }
+type RuleLike = { id?: string; stage?: unknown; conditions?: unknown[]; actions?: unknown[]; [key: string]: unknown };
+
+/**
+ * #651: pick the payee's default-category rule from upstream's getPayeeRules(payeeId) result.
+ * A rule qualifies only when its stage is null or absent, it has EXACTLY ONE condition
+ * `{ field: 'payee', op: 'is', value: payeeId }` and EXACTLY ONE action
+ * `{ op: 'set', field: 'category' }`. That is upstream's own default-category predicate
+ * (getIsSetterRules in loot-core transaction-rules.ts) restricted to `is`. Upstream's list also
+ * holds rules that EXCLUDE the payee (isNot, notOneOf), SHARE it (oneOf), pair it with another
+ * condition, carry a second action or run in the pre/post stage; editing or deleting any of
+ * those would change other payees or drop a hand-written action, so they never qualify. The
+ * first qualifying rule in the given (upstream) order wins.
+ */
+export function selectDefaultCategoryRule(rules: unknown, payeeId: string): RuleLike | undefined {
+  if (!Array.isArray(rules)) return undefined;
+  return (rules as RuleLike[]).find((rule) => {
+    if (!rule || typeof rule !== 'object') return false;
+    if (rule.stage != null) return false;
+    const conditions = rule.conditions;
+    const actions = rule.actions;
+    if (!Array.isArray(conditions) || conditions.length !== 1) return false;
+    if (!Array.isArray(actions) || actions.length !== 1) return false;
+    const c = conditions[0] as { field?: unknown; op?: unknown; value?: unknown } | null;
+    const a = actions[0] as { field?: unknown; op?: unknown } | null;
+    return c?.field === 'payee' && c.op === 'is' && c.value === payeeId &&
+      a?.op === 'set' && a.field === 'category';
+  });
+}
+// #760: Actual creates the link between a payee and an account itself (createAccount inserts the
+// transfer payee). Setting transfer_acct on an existing payee is never legitimate: an unknown
+// account id hides the payee from every read (the v_payees view joins accounts), and a real one
+// makes a second transfer payee for that account. The message names no tool and no id so it stays
+// valid when the legacy surface goes away.
+const PAYEE_TRANSFER_ACCT_REFUSAL =
+  'transfer_acct cannot be set: transfer payees are created by Actual with their account. Rename the account instead.';
+
 export async function updatePayee(id: string, fields: Partial<components['schemas']['Payee']> | unknown): Promise<void> {
   observability.incrementToolCall('actual.payees.update').catch(() => {});
+  // #760: a pure test on the input, so it needs no read and runs before the queue. Any value is
+  // refused (null and "" too), and an unknown payee id gets this refusal rather than not-found.
+  if (fields !== null && typeof fields === 'object' && (fields as Record<string, unknown>).transfer_acct !== undefined) {
+    throw new ConflictRefusal(PAYEE_TRANSFER_ACCT_REFUSAL);
+  }
   return queueWriteOperation(async () => {
     // #378: this guard's pre-read is safe against a SIBLING operation in the same drain only
     // because the batch dispatches sequentially. It reads a listing memoised for this drain,
@@ -2889,13 +3514,24 @@ export async function updatePayee(id: string, fields: Partial<components['schema
     // whose account no longer exists, is not a real workflow, and because the alternative
     // is leaving four tools able to create phantom rows.
     const payees = await withConcurrency(() =>
-      retry(() => readDrainListing('payees', () => rawGetPayees() as Promise<Array<{ id?: string }>>), { retries: 2, backoffMs: 200 })
+      retry(() => readDrainListing('payees', () => rawGetPayees() as Promise<Array<{ id?: string; name?: string; transfer_acct?: string | null }>>), { retries: 2, backoffMs: 200 })
     );
-    if (!(Array.isArray(payees) && payees.some((p) => p?.id === id))) {
+    const payeeRow = Array.isArray(payees) ? payees.find((p) => p?.id === id) : undefined;
+    if (!payeeRow) {
       throw new NotFoundRefusal('Payee', id, 'actual_payees_get');
     }
 
     const fieldsObj = fields as Record<string, unknown>;
+
+    // #765: a transfer payee's shown name is its account's name (upstream getPayees and the
+    // v_payees view return COALESCE(account.name, payee.name)), so a stored rename never shows
+    // and the call used to report success for nothing. Refuse the whole call, before any write,
+    // so `name` with `category` writes neither. Any `name` value is refused, the current one
+    // too; `category` alone stays allowed (the default-category rule is a rule, not the name).
+    // The text names no tool, like the #760 refusal above.
+    if (payeeRow.transfer_acct && fieldsObj.name !== undefined) {
+      throw new ConflictRefusal(`"${payeeRow.name ?? id}" is a transfer payee: its name is its account's name, so it cannot be renamed here. Rename the account instead. Nothing was written.`);
+    }
 
     // Extract `category` — it is NOT a direct column on the payees table in Actual Budget.
     // The "default category" feature is implemented via rules (condition: payee is X → action: set category).
@@ -2917,7 +3553,7 @@ export async function updatePayee(id: string, fields: Partial<components['schema
       assertRuleReferencesExist(categoryRefs, await loadRuleReferenceListings(categoryRefs), RULE_REFUSAL_CHANGED);
     }
 
-    // Update the payee's direct fields (name, transfer_acct, etc.)
+    // Update the payee's direct fields (name; transfer_acct is refused above)
     if (Object.keys(directFields).length > 0) {
       await withConcurrency(() => retry(() => rawUpdatePayee(id, directFields) as Promise<void>, { retries: 2, backoffMs: 200, isRetryable: isRetryableError }));
     }
@@ -2928,24 +3564,28 @@ export async function updatePayee(id: string, fields: Partial<components['schema
         retry(() => rawGetPayeeRules(id) as Promise<unknown[]>, { retries: 2, backoffMs: 200 })
       );
 
-      // Find an existing "set category" action rule for this payee
-      const setCategoryRule = (existingRules as any[]).find((rule: any) =>
-        Array.isArray(rule.actions) &&
-        rule.actions.some((a: any) => a.op === 'set' && a.field === 'category')
-      );
+      // #651: only the payee's OWN default-category rule may be edited or deleted. Upstream's
+      // getPayeeRules also returns rules that exclude this payee (isNot, notOneOf) or share it
+      // with others (oneOf), and narrower or multi-action rules; those are never touched.
+      const setCategoryRule = selectDefaultCategoryRule(existingRules, id);
 
       if (setCategoryRule) {
         if (categoryValue === null) {
-          // null = clear the default category — delete the rule
+          // null = clear the default category: delete the rule
           await withConcurrency(() => retry(() => rawDeleteRule(setCategoryRule.id) as Promise<void>, { retries: 0, backoffMs: 200 }));
           logger.debug(`[UPDATE PAYEE] Cleared default category rule for payee ${id}`);
         } else {
           // Update existing rule's category action value
           const updatedRule = {
             ...setCategoryRule,
-            actions: setCategoryRule.actions.map((a: any) =>
-              a.op === 'set' && a.field === 'category' ? { ...a, value: categoryValue } : a
-            ),
+            // Drop the action's options: upstream applies options.template or options.formula
+            // instead of `value`, so keeping them would report success and change nothing.
+            actions: (setCategoryRule.actions as any[]).map((a: any) => {
+              if (!(a.op === 'set' && a.field === 'category')) return a;
+              const next = { ...a, value: categoryValue };
+              delete next.options;
+              return next;
+            }),
           };
           await withConcurrency(() => retry(() => rawUpdateRule(updatedRule) as Promise<void>, { retries: 0, backoffMs: 200, isRetryable: isRetryableError }));
           logger.debug(`[UPDATE PAYEE] Updated default category rule for payee ${id} to category ${categoryValue}`);
@@ -3012,7 +3652,7 @@ export async function getRules(): Promise<unknown[]> {
 const RULE_REFERENCE_FIELDS = {
   category: { entity: 'Category', listTool: 'actual_categories_get' },
   payee: { entity: 'Payee', listTool: 'actual_payees_get' },
-  account: { entity: 'Account', listTool: 'actual_accounts_get' },
+  account: { entity: 'Account', listTool: 'actual_accounts_list' },
 } as const;
 type RuleReferenceField = keyof typeof RULE_REFERENCE_FIELDS;
 
@@ -3596,6 +4236,35 @@ async function stripDeadScheduleConditions(
     throw failed('its rule could not be rewritten', err);
   }
 }
+/**
+ * #785: upstream stores any account or payee id on a schedule without a lookup, so an id that
+ * names nothing (or a payee id sent as the account) leaves a rule that can never match, and the
+ * read side shows the field as null. Refuse it, before the raw write, inside the queued write.
+ * `null` is the clear on update and needs no read; undefined is skipped. A closed account and a
+ * transfer payee count as existing; a tombstoned payee does not. Each id is checked against its
+ * own listing only. The account is checked first, so a call with both unknown names the account.
+ * NOT exported: the adapter methods below are the only callers.
+ */
+async function assertScheduleLinksExist(fields: Record<string, unknown>): Promise<void> {
+  if (typeof fields.account === 'string') {
+    const id = fields.account;
+    const accounts = await withConcurrency(() =>
+      retry(() => readDrainListing('accounts', () => rawGetAccounts() as Promise<Array<{ id?: string }>>), { retries: 2, backoffMs: 200 })
+    );
+    if (!(Array.isArray(accounts) && accounts.some((a) => a?.id === id))) {
+      throw new NotFoundRefusal('Account', id, 'actual_accounts_list', 'The schedule was not written: its rule would otherwise point at an account that does not exist and never match.');
+    }
+  }
+  if (typeof fields.payee === 'string') {
+    const id = fields.payee;
+    const payees = await withConcurrency(() =>
+      retry(() => readDrainListing('payees', () => rawGetPayees() as Promise<Array<{ id?: string; tombstone?: boolean }>>), { retries: 2, backoffMs: 200 })
+    );
+    if (!(Array.isArray(payees) && payees.some((p) => p?.id === id && !p.tombstone))) {
+      throw new NotFoundRefusal('Payee', id, 'actual_payees_get', 'The schedule was not written: its rule would otherwise point at a payee that does not exist and never match.');
+    }
+  }
+}
 export async function createSchedule(schedule: unknown): Promise<string> {
   observability.incrementToolCall('actual.schedules.create').catch(() => {});
   return queueWriteOperation(async () => {
@@ -3603,6 +4272,7 @@ export async function createSchedule(schedule: unknown): Promise<string> {
     const input = (schedule ?? {}) as Record<string, unknown>;
     // Note: rawCreateSchedule(schedule) passes the external schedule object directly.
     // Do NOT wrap in { schedule: ... }: that would double-nest and break date parsing.
+    await assertScheduleLinksExist(input);
     const raw = await withConcurrency(() => retry(() => rawCreateSchedule(input) as Promise<string>, { retries: 0, backoffMs: 200, isRetryable: isRetryableError }));
     const id = normalizeToId(raw);
     // #547: an omitted payee or account is stored as a condition that can never match.
@@ -3640,6 +4310,7 @@ export async function updateSchedule(id: string, fields: unknown, resetNextDate?
         }
       }
     }
+    await assertScheduleLinksExist(patch);
     await withConcurrency(() => retry(() => rawUpdateSchedule(id, patch, resetNextDate) as Promise<void>, { retries: 0, backoffMs: 200, isRetryable: isRetryableError }));
     // #547: a payee or account cleared with null is stored as the literal string "null".
     await stripDeadScheduleConditions(id, unsetScheduleLinkFields(patch, 'update'), opStartedAt, 'update');
@@ -3673,6 +4344,17 @@ export async function deleteSchedule(id: string): Promise<void> {
 export async function setBudgetCarryover(month: string, categoryId: string, flag: boolean): Promise<void> {
   observability.incrementToolCall('actual.budgets.setCarryover').catch(() => {});
   return queueWriteOperation(async () => {
+    // #771: upstream refuses an income category with its internal handler name
+    // (`budget-set-carryover: category "<id>" is not an expense category`). Read first and refuse
+    // in the caller's words; a race past this read still reaches upstream's own refusal.
+    const categories = await withConcurrency(() =>
+      retry(() => readDrainListing('categories', () => rawGetCategories() as Promise<Array<{ id?: string; name?: string; is_income?: boolean }>>), { retries: 2, backoffMs: 200 })
+    );
+    const category = Array.isArray(categories) ? categories.find((c) => c?.id === categoryId) : undefined;
+    if (!category && Array.isArray(categories)) throw new NotFoundRefusal('Category', categoryId, 'actual_categories_get');
+    if (category?.is_income) {
+      throw new ConflictRefusal(`Category "${category.name ?? categoryId}" (${categoryId}) is an income category, and carryover applies only to expense categories. Nothing was written.`);
+    }
     await withConcurrency(() => retry(() => rawSetBudgetCarryover(month, categoryId, flag) as Promise<void>, { retries: 2, backoffMs: 200, isRetryable: isRetryableError }));
   }, { preservesListings: PRESERVES_ALL_ENTITY_LISTINGS });
 }
@@ -3725,7 +4407,7 @@ export async function closeAccount(
   observability.incrementToolCall('actual.accounts.close').catch(() => {});
   return queueWriteOperation(async () => {
     const before = await withConcurrency(() =>
-      retry(() => readDrainListing('accounts', () => rawGetAccounts() as Promise<Array<{ id?: string; name?: string; closed?: boolean }>>), { retries: 2, backoffMs: 200 })
+      retry(() => readDrainListing('accounts', () => rawGetAccounts() as Promise<Array<{ id?: string; name?: string; closed?: boolean; offbudget?: boolean }>>), { retries: 2, backoffMs: 200 })
     );
     const list = Array.isArray(before) ? before : [];
     const target = list.find((a) => a?.id === id);
@@ -3758,6 +4440,36 @@ export async function closeAccount(
             'so the closing balance would be moved somewhere hidden from most views. Pick an ' +
             'open account, or reopen that one with actual_accounts_reopen first.'
         );
+      }
+    }
+
+    if (transferAccountId) {
+      const destination = list.find((a) => a?.id === transferAccountId)!;
+      // #768: upstream writes the closing row only when the account's balance (the sum of EVERY
+      // non-parent row, any date, so not rawGetAccountBalance, which stops at today) is non-zero.
+      // Only then do the pairing rules below matter; a zero-balance close ignores both arguments.
+      const { q } = (await import('@actual-app/api')) as any; // eslint-disable-line @typescript-eslint/no-explicit-any
+      const sum = (await withConcurrency(() =>
+        retry(() => rawRunQuery(q('transactions').filter({ account: id }).calculate({ $sum: '$amount' })) as Promise<{ data?: unknown }>, { retries: 2, backoffMs: 200 })
+      ))?.data;
+      if (typeof sum === 'number' && sum !== 0) {
+        // Actual clears the category of a closing row unless an on-budget account is closed into
+        // an off-budget one (clearCategory and onInsert upstream), so only that pairing can keep
+        // one, and it is the only pairing that needs one to stay inside the budget.
+        const srcOn = target.offbudget !== true;
+        const dstOn = destination.offbudget !== true;
+        const srcName = target.name ?? id;
+        const dstName = destination.name ?? transferAccountId;
+        if (srcOn && !dstOn && !transferCategoryId) {
+          throw new ConflictRefusal(
+            `Closing "${srcName}" into the off-budget account "${dstName}" needs transferCategoryId: the closing transaction would otherwise leave the budget as an uncategorised outflow. Nothing was written.`
+          );
+        }
+        if (transferCategoryId && !(srcOn && !dstOn)) {
+          throw new ConflictRefusal(
+            `transferCategoryId has no effect when closing "${srcName}" (${srcOn ? 'on-budget' : 'off-budget'}) into "${dstName}" (${dstOn ? 'on-budget' : 'off-budget'}): Actual keeps a category on the closing transaction only when an on-budget account is closed into an off-budget one. Omit it. Nothing was written.`
+          );
+        }
       }
     }
 
@@ -3905,10 +4617,54 @@ export async function getCategoryGroups(): Promise<unknown[]> {
 export async function createCategoryGroup(group: unknown): Promise<string> {
   observability.incrementToolCall('actual.category_groups.create').catch(() => {});
   return queueWriteOperation(async () => {
+    const opStartedAt = Date.now();
+    // #764: Actual counts only the FIRST income group toward the budget and a new group is appended
+    // last, so a second income group would hold income the budget never counts. Refuse it first.
+    if ((group as { is_income?: unknown } | null)?.is_income === true) {
+      const existing = await withConcurrency(() =>
+        retry(() => readDrainListing('categoryGroups', () => rawGetCategoryGroups() as Promise<Array<{ id?: string; name?: string; is_income?: boolean }>>), { retries: 2, backoffMs: 200 })
+      );
+      const income = Array.isArray(existing) ? existing.find((g) => g?.is_income === true) : undefined;
+      if (income) {
+        throw new ConflictRefusal(`Cannot create an income category group: this budget already has one ("${income.name ?? income.id}", ${income.id}), and Actual counts only the first income group toward the budget. Add income categories to that group instead.`);
+      }
+    }
     const raw = await withConcurrency(() => retry(() => rawCreateCategoryGroup(group) as Promise<string | { id?: string }>, { retries: 2, backoffMs: 200, isRetryable: isRetryableError }));
     const id = normalizeToId(raw);
+    // #764: upstream's api/category-group-create drops is_income, so set it with an update and verify it.
+    if ((group as { is_income?: unknown } | null)?.is_income === true) {
+      await ensureGroupIsIncome(id, String((group as { name?: unknown }).name ?? id), opStartedAt);
+    }
     return id;
   });
+}
+async function ensureGroupIsIncome(id: string, name: string, opStartedAt: number): Promise<void> {
+  // Neither message below contains a TRANSIENT_ERROR_PATTERNS substring ("timed out" included):
+  // _shouldDropPoolOnError would drop the session's connection. Upstream causes stay in `cause`.
+  const T = config.ACTUAL_OP_TIMEOUT_MS;
+  const deadline = T > 0
+    ? Math.min(Date.now() + SPLIT_VERIFY_TIMEOUT_MS, opStartedAt + Math.floor(T / 2))
+    : Date.now() + SPLIT_VERIFY_TIMEOUT_MS;
+  let cause: unknown;
+  try {
+    await withConcurrency(() => retry(() => rawUpdateCategoryGroup(id, { is_income: true }) as Promise<void>, { retries: 2, backoffMs: 200, isRetryable: isRetryableError }));
+    for (;;) {
+      const groups = await withConcurrency(() => retry(() => rawGetCategoryGroups() as Promise<Array<{ id?: string; is_income?: boolean }>>, { retries: 2, backoffMs: 200 }));
+      const row = (Array.isArray(groups) ? groups : []).find((g) => g?.id === id);
+      if (row?.is_income === true) return;
+      if (Date.now() >= deadline) break;
+      await new Promise((resolve) => setTimeout(resolve, SPLIT_VERIFY_INTERVAL_MS));
+    }
+  } catch (err) {
+    cause = err;
+  }
+  const base = `Category group "${name}" was not created as an income group (is_income could not be set).`;
+  try {
+    await withConcurrency(() => retry(() => rawDeleteCategoryGroup(id) as Promise<void>, { retries: 0, backoffMs: 200 }));
+  } catch (delErr) {
+    throw new Error(`${base} The group "${id}" EXISTS: delete it with actual_category_groups_delete.`, { cause: delErr });
+  }
+  throw new Error(`${base} Nothing was kept.`, { cause });
 }
 export async function updateCategoryGroup(id: string, fields: unknown): Promise<void> {
   observability.incrementToolCall('actual.category_groups.update').catch(() => {});
@@ -4123,7 +4879,7 @@ const BUDGET_BATCH_DEADLINE_FRACTION = 0.75;
  *
  * RETRY: none. A refusal must never replay, an apply failure is deterministic, a retry would
  * spend the deadline, and infrastructure errors abort the batch instead; the client re-reads
- * (`actual_budgets_getMonth`) and retries.
+ * (`actual_budgets_get_month`) and retries.
  *
  * COOPERATIVE DEADLINE. The whole operation runs under one `withOpTimeout`, a `Promise.race`
  * that cannot cancel the callback, so an abandoned loop would keep writing after the caller was
@@ -4145,17 +4901,29 @@ export async function setBudgetBatch(items: BudgetBatchItem[]): Promise<BudgetBa
 
     // Phase 1: reads, then refusal decisions. Both reads happen BEFORE the first write.
     const categories = await withConcurrency(() =>
-      retry(() => readDrainListing('categories', () => rawGetCategories() as Promise<Array<{ id: string; is_income?: boolean }>>), { retries: 2, backoffMs: 200 })
+      retry(() => readDrainListing('categories', () => rawGetCategories() as Promise<Array<{ id: string; name?: string; is_income?: boolean }>>), { retries: 2, backoffMs: 200 })
     );
-    const categoryById = new Map<string, { id: string; is_income?: boolean }>();
-    for (const c of categories as Array<{ id: string; is_income?: boolean }>) categoryById.set(c.id, c);
+    const categoryById = new Map<string, { id: string; name?: string; is_income?: boolean }>();
+    for (const c of categories as Array<{ id: string; name?: string; is_income?: boolean }>) categoryById.set(c.id, c);
     const months = await withConcurrency(() =>
       retry(() => rawGetBudgetMonths() as Promise<string[]>, { retries: 2, backoffMs: 200 })
     );
     const monthKnown = Array.isArray(months) && months.length > 0;
+    // #759: whether the budget is a tracking budget, read lazily and once per call, only when an
+    // income item carries an amount (an envelope budget has no cell for it, a tracking one does).
+    let trackingBudget: boolean | undefined;
+    const isTracking = async (): Promise<boolean> => {
+      if (trackingBudget === undefined) {
+        const budgetMonth = await withConcurrency(() =>
+          retry(() => rawGetBudgetMonth(months[0]) as Promise<unknown>, { retries: 2, backoffMs: 200, isRetryable: isRetryableError })
+        );
+        trackingBudget = isTrackingBudgetMonth(budgetMonth);
+      }
+      return trackingBudget;
+    };
 
     const toWrite: Array<{ index: number; item: BudgetBatchItem }> = [];
-    items.forEach((item, index) => {
+    for (const [index, item] of items.entries()) {
       let refusal: Error | null = null;
       const category = categoryById.get(item.categoryId);
       if (!category) {
@@ -4163,7 +4931,7 @@ export async function setBudgetBatch(items: BudgetBatchItem[]): Promise<BudgetBa
       } else if (monthKnown && !months.includes(String(item.month))) {
         refusal = new OutOfRangeRefusal(
           `Month "${item.month}" is outside this budget's range, which runs from ${months[0]} to ` +
-            `${months[months.length - 1]}. Use actual_budgets_getMonths to see the months you can budget to.`,
+            `${months[months.length - 1]}. Use actual_budgets_get_months to see the months you can budget to.`,
           String(item.month),
         );
       } else if (item.carryover !== undefined && category.is_income) {
@@ -4172,10 +4940,12 @@ export async function setBudgetBatch(items: BudgetBatchItem[]): Promise<BudgetBa
             'Nothing was written for this item.',
           String(item.categoryId),
         );
+      } else if (monthKnown && item.amount !== undefined && category.is_income && !(await isTracking())) {
+        refusal = incomeSetAmountRefusal(category);
       }
       if (refusal) failed.push({ index, month: item.month, categoryId: item.categoryId, error: refusal.message });
       else toWrite.push({ index, item });
-    });
+    }
 
     // Phase 2: raw writes only, each awaited on its own (no bracket, see #539 above).
     const deadlineMs = config.ACTUAL_OP_TIMEOUT_MS > 0 ? config.ACTUAL_OP_TIMEOUT_MS * BUDGET_BATCH_DEADLINE_FRACTION : 0;
@@ -4204,7 +4974,7 @@ export async function setBudgetBatch(items: BudgetBatchItem[]): Promise<BudgetBa
           total: items.length,
           applied: succeeded.map((x) => x.index).join(', '),
           message: msg,
-          readBackTool: 'actual_budgets_getMonth',
+          readBackTool: 'actual_budgets_get_month',
         });
         failed.push({ ...ref, error: amountWritten ? `amount was applied, then the carryover failed: ${msg}` : msg });
       }
@@ -4486,7 +5256,7 @@ export async function runQuery(queryString: string | any): Promise<unknown> {
       const errorMsg = error?.message || String(error);
       
       if (errorMsg.includes('tableName') || errorMsg.includes('expandStar') || errorMsg.includes('Cannot read properties of undefined')) {
-        throw new Error(`SQL query parsing failed. The Actual Budget query engine has limitations with complex SQL features like COUNT(*), SUM(), GROUP BY, and aggregate functions. Try using simpler queries or ActualQL format instead. See https://actualbudget.org/docs/api/actual-ql/ for supported syntax. Error: ${errorMsg}`);
+        throw new Error(`SQL query could not be translated for the query engine. Supported shape: SELECT fields FROM table [WHERE ...] [ORDER BY one column] [LIMIT n]. Error: ${errorMsg}`);
       }
       
       throw error;
@@ -4749,21 +5519,26 @@ export async function getBudgets(): Promise<unknown[]> {
     const raw = await withConcurrency(() => retry(() => rawGetBudgets() as Promise<unknown>, { retries: 2, backoffMs: 200 }));
     const files = Array.isArray(raw) ? raw : [];
     // #570: a restricted caller sees only files whose groupId (the sync id) it may
-    // use. A file with no groupId was never uploaded and belongs to no list. The
-    // dynamic ACL resolver calls this under its own `allowedBudgets: ['*']`, so it
-    // still sees every file.
+    // use. A file with no groupId was never uploaded and belongs to no list.
     const allowed = restrictedAllowedBudgets('actual_budgets_get_all');
     if (!allowed) return files;
-    return files.filter(f => {
+    const permitted = files.filter(f => {
       const groupId = (f as { groupId?: unknown } | null)?.groupId;
       return typeof groupId === 'string' && allowed.includes(groupId);
+    });
+    if (!config.AUTH_BUDGET_DISCOVERY || !requestContext.getStore()?.discoveredBudgets) return permitted;
+    // The SDK server inventory also carries the raw key ID. Discovery exposes only the flag.
+    return permitted.map(file => {
+      if (!('encryptKeyId' in file)) return file;
+      const { encryptKeyId, ...rest } = file;
+      return { ...rest, hasEncryption: Boolean(encryptKeyId) };
     });
   });
 }
 
 /**
  * Switch the active budget by name (case-insensitive, EXACT match only).
- * The budget must be pre-configured via BUDGET_n_NAME env vars.
+ * Discovery also accepts a permitted Sync ID or discovered name.
  *
  * Issue #156:
  *   * Per-session: writes to the per-session map keyed by current sessionId.
@@ -4797,21 +5572,64 @@ export async function switchBudget(name: string): Promise<{ name: string; syncId
     );
   }
 
-  const key = name.toLowerCase();
-  const found: BudgetConfig | undefined = budgetRegistry.get(key);
+  const discovery = config.AUTH_BUDGET_DISCOVERY && store?.discoveredBudgets !== undefined;
+  const entries = requestBudgets();
+  const nameKey = name.toLowerCase();
+  let found = budgetRegistry.get(nameKey);
+  if (discovery) {
+    // A usable configured budget wins by name, including when a shared file carries
+    // that name, or carries it as its Sync ID: otherwise anyone who can share a file could
+    // redirect or block a configured name, and a configured budget whose Sync ID is shared (one
+    // file copied to a second server) has no other selector. The file stays reachable by its
+    // own Sync ID, or by its name when the Sync ID is the configured name.
+    found = found && entries.includes(found) ? found : undefined;
+    if (!found) {
+      const byId = entries.filter(b => b.syncId === name);
+      if (byId.length > 1) throw new OutOfRangeRefusal(
+        `Ambiguous Sync ID. Switch by budget name: ${byId.map(b => b.name).join(', ')}.`, name);
+      found = byId[0];
+    }
+    if (!found) {
+      const matches = entries.filter(b => b.name.toLowerCase() === nameKey);
+      if (matches.length > 1) throw new OutOfRangeRefusal(
+        `Ambiguous budget name. Switch by Sync ID: ${matches.map(b => b.syncId).join(', ')}.`, name);
+      // #690: a locked file with this name makes the name ambiguous as well. Opening the usable
+      // one silently (what PR #716 and the first spec did) would let anyone who can share a file
+      // redirect the name of a locked configured budget to their own file. Only a grantee has
+      // locked rows, so this tells nobody about a file they could not already list.
+      const lockedIds = matches.length ? lockedBudgets().filter(b => b.name.toLowerCase() === nameKey).map(b => b.syncId) : [];
+      if (lockedIds.length) throw new OutOfRangeRefusal(
+        `Ambiguous budget name. Switch by Sync ID: ${[matches[0].syncId, ...lockedIds].join(', ')}.`, name);
+      found = matches[0];
+    }
+  }
   // #570: a restricted caller is told only about budgets it may use.
   const notFound = (): Error => {
     const permitted = restrictedAllowedBudgets('actual_budgets_switch');
-    const available = [...budgetRegistry.values()]
+    const available = entries
       .filter(b => !permitted || permitted.includes(b.syncId))
       .map(b => `"${b.name}"`).join(', ') || 'none permitted for this session';
+    if (discovery) return new NotFoundRefusal('Budget', name, 'actual_budgets_list_available', undefined,
+      `Budget not found. Available budgets: ${available}.`);
     return new Error(
       `Budget "${name}" not found in configuration. ` +
       `Available budgets: ${available}. ` +
       `Add BUDGET_n_NAME/SYNC_ID/SERVER_URL vars to configure additional budgets.`,
     );
   };
-  if (!found) throw notFound();
+  if (!found) {
+    const locked = lockedBudgets();
+    const byId = locked.find(file => file.syncId === name);
+    if (byId) throw new LockedRefusal(byId.syncId);
+    const byName = locked.filter(file => file.name.toLowerCase() === nameKey);
+    if (byName.length === 1) throw new LockedRefusal(byName[0].syncId);
+    // Two locked files with one name: both are in this caller's listing, so "not found" (what the
+    // #690 spec said) would contradict it. Same refusal as every other ambiguous name; each
+    // Sync ID then gives the locked refusal. Only a grantee has locked rows.
+    if (byName.length > 1) throw new OutOfRangeRefusal(
+      `Ambiguous budget name. Switch by Sync ID: ${byName.map(file => file.syncId).join(', ')}.`, name);
+    throw notFound();
+  }
   // #628: tool results show the server origin only, never a userinfo credential, path or query.
   // `found` keeps the raw URL, which the login below still needs.
   const shownServerUrl = logSafeOrigin(found.serverUrl);
@@ -4874,11 +5692,11 @@ export async function switchBudget(name: string): Promise<{ name: string; syncId
 
   if (sameAuth && currentEntry!.syncId === found.syncId) {
     // No-op: already on this exact budget. Keep session map consistent and return.
-    setSessionBudget(sessionId, key);
+    setSessionBudget(sessionId, found, discovery);
     setPreferredBudgetSyncId(store?.principal, found.syncId); // #189: persist at commit
 
     logger.info(
-      `[ADAPTER] switchBudget no-op for session ${sessionId}: already on "${found.name}" (${found.syncId})`,
+      `[ADAPTER] switchBudget no-op for session ${sessionId}: already on "${budgetLogName(found)}" (${found.syncId})`,
     );
     return { name: found.name, syncId: found.syncId, serverUrl: shownServerUrl };
   }
@@ -4887,7 +5705,7 @@ export async function switchBudget(name: string): Promise<{ name: string; syncId
     // Same server + creds, different syncId. Reload budget file in place.
     logger.info(
       `[ADAPTER] switchBudget fast path for session ${sessionId}: ` +
-        `same server, reloading budget "${found.name}" (${found.syncId})`,
+        `same server, reloading budget "${budgetLogName(found)}" (${found.syncId})`,
     );
     if (_skipApiInitForTests) {
       // Skip the real downloadBudget call in tests; tests verify the fast
@@ -4901,11 +5719,11 @@ export async function switchBudget(name: string): Promise<{ name: string; syncId
       });
     }
     connectionPool.updateLoadedSyncId(sessionId, found.syncId);
-    setSessionBudget(sessionId, key);
+    setSessionBudget(sessionId, found, discovery);
     setPreferredBudgetSyncId(store?.principal, found.syncId); // #189: persist at commit
 
     logger.info(
-      `[ADAPTER] Active budget switched for session ${sessionId} to: "${found.name}" (${found.syncId}) on ${logSafeOrigin(found.serverUrl)}`,
+      `[ADAPTER] Active budget switched for session ${sessionId} to: "${budgetLogName(found)}" (${found.syncId}) on ${logSafeOrigin(found.serverUrl)}`,
     );
     return { name: found.name, syncId: found.syncId, serverUrl: shownServerUrl };
   }
@@ -4934,7 +5752,7 @@ export async function switchBudget(name: string): Promise<{ name: string; syncId
 
     // Update the per-session active-budget slot. Subsequent getActiveBudgetConfig
     // calls for this session now return the new budget.
-    setSessionBudget(sessionId, key);
+    setSessionBudget(sessionId, found, discovery);
     setPreferredBudgetSyncId(store?.principal, found.syncId); // #189: persist at commit
 
     // Materialise a fresh pool entry bound to the new budget. Without this, the
@@ -4977,11 +5795,14 @@ export async function switchBudget(name: string): Promise<{ name: string; syncId
     }
   } finally {
     // A no-op once getConnection handed the reservation over to the new entry.
+    // getConnection also drops the reservation when it fails, for every session alike: the
+    // global cap counts pool connections, and a session left on the legacy fallback holds
+    // none. Its per-principal admission is kept until the session ends (forgetSession).
     if (holdsSlot) connectionPool.releaseReservation(sessionId);
   }
 
   logger.info(
-    `[ADAPTER] Active budget switched for session ${sessionId} to: "${found.name}" (${found.syncId}) on ${logSafeOrigin(found.serverUrl)}`,
+    `[ADAPTER] Active budget switched for session ${sessionId} to: "${budgetLogName(found)}" (${found.syncId}) on ${logSafeOrigin(found.serverUrl)}`,
   );
   return { name: found.name, syncId: found.syncId, serverUrl: shownServerUrl };
 }
@@ -4996,20 +5817,37 @@ export function clearSessionBudgetState(sessionId: string): void {
   sessionBudgetState.delete(sessionId);
 }
 
+// #628: share the origin only. Connection paths keep the full URL and credentials.
+function displayedBudget(file: BudgetFile): BudgetFile {
+  return { name: file.name, syncId: file.syncId, serverUrl: logSafeOrigin(file.serverUrl) };
+}
+
 /**
- * Return the configured budgets this caller may use (for actual_budgets_list_available).
- * A restricted caller sees only its permitted entries (#570); the startup registry log
- * reads the Map directly and is not filtered.
+ * The budget this caller's session is on, or undefined when it cannot be told (#787). Never throws.
+ * Side effect: getActiveBudgetConfig memoises a restored preference into the session slot, so a
+ * listing in a fresh session pins it to the restored budget, the same answer its next budget call
+ * would compute.
  */
-export function getBudgetRegistry(): Array<{ name: string; syncId: string; serverUrl: string; hasEncryption: boolean }> {
+function activeBudgetForListing(): BudgetConfig | undefined {
+  if (!requestContext.getStore()?.sessionId) return undefined;
+  try { return getActiveBudgetConfig(); } catch { return undefined; }
+}
+
+/** List usable budgets first, then granted encrypted files that need a server key. */
+export function getBudgetRegistry() {
   const allowed = restrictedAllowedBudgets('actual_budgets_list_available');
-  return [...budgetRegistry.values()].filter(b => !allowed || allowed.includes(b.syncId)).map(b => ({
-    name: b.name,
-    syncId: b.syncId,
-    // #628: origin only; the registry entry itself keeps the raw URL for the login.
-    serverUrl: logSafeOrigin(b.serverUrl),
-    hasEncryption: !!b.encryptionPassword,
-  }));
+  const active = activeBudgetForListing();
+  let marked = false;
+  const usable = requestBudgets().filter(b => !allowed || allowed.includes(b.syncId)).map(b => {
+    // Match on syncId AND name, never object identity (discovery builds new objects per call), and
+    // mark the FIRST match only. A row outside the filtered list is never marked (#787).
+    const isActive = !marked && !!active && b.syncId === active.syncId && b.name === active.name;
+    if (isActive) marked = true;
+    return { ...displayedBudget(b), hasEncryption: !!b.encryptionPassword, ...(isActive ? { active: true as const } : {}) };
+  });
+  return [...usable, ...lockedBudgets().map(file => ({
+    ...displayedBudget(file), hasEncryption: true, locked: true as const, hint: LockedRefusal.hint,
+  }))];
 }
 
 /**
@@ -5019,8 +5857,67 @@ export function getBudgetRegistry(): Array<{ name: string; syncId: string; serve
 export async function getIDByName(type: string, name: string): Promise<string> {
   return withActualApi(async () => {
     observability.incrementToolCall('actual.getIDByName').catch(() => {});
+    // #801: upstream takes `data[0].id` of this same query, so two rows of one name came back as
+    // one arbitrary id. Run the query here to see them all. Exactly one row returns its id with no
+    // second upstream call; none falls through to upstream so its "Not found" text is unchanged.
+    const { q } = (await import('@actual-app/api')) as any;
+    const res = await withConcurrency(() => retry(
+      () => rawRunQuery(q(type).filter({ name }).select('*')) as Promise<{ data?: unknown }>,
+      { retries: 2, backoffMs: 200 },
+    ));
+    const rows = (Array.isArray(res?.data) ? res.data : []) as Array<Record<string, unknown>>;
+    if (rows.length === 1 && typeof rows[0].id === 'string') return rows[0].id;
+    if (rows.length > 1) {
+      const groupNames = type === 'categories' ? await categoryGroupNamesById() : undefined;
+      throw ambiguousNameRefusal(
+        nameLookupNoun(type),
+        name,
+        rows.filter((r) => typeof r.id === 'string').map((r) => ({ id: String(r.id), detail: nameCandidateDetail(type, r, groupNames) })),
+      );
+    }
     return await withConcurrency(() => retry(() => rawGetIDByName(type, name) as Promise<string>, { retries: 2, backoffMs: 200 }));
   });
+}
+
+/** `accounts` to `account`, `categories` to `category`: the noun the #801 refusal counts. */
+function nameLookupNoun(type: string): string {
+  return type === 'categories' ? 'category' : type.replace(/s$/, '');
+}
+
+/** Group names for the category candidates, read once and only on the refusal path (#801). */
+async function categoryGroupNamesById(): Promise<Map<string, string>> {
+  const groups = await withConcurrency(() => retry(
+    () => rawGetCategoryGroups() as Promise<Array<{ id?: string; name?: string }>>,
+    { retries: 2, backoffMs: 200 },
+  ));
+  const out = new Map<string, string>();
+  for (const g of Array.isArray(groups) ? groups : []) {
+    if (typeof g.id === 'string' && typeof g.name === 'string') out.set(g.id, g.name);
+  }
+  return out;
+}
+
+/**
+ * What tells two same-named rows apart, from the `select('*')` row (#801). A missing field
+ * degrades to an empty detail and never throws.
+ */
+function nameCandidateDetail(type: string, row: Record<string, unknown>, groupNames?: Map<string, string>): string {
+  const parts: string[] = [];
+  if (type === 'accounts') {
+    if (row.closed !== undefined) parts.push(row.closed ? 'closed' : 'open');
+    if (row.offbudget !== undefined) parts.push(row.offbudget ? 'off budget' : 'on budget');
+  } else if (type === 'categories') {
+    const gid = row.group ?? row.cat_group;
+    const gname = typeof gid === 'string' ? groupNames?.get(gid) : undefined;
+    if (gname) parts.push(`group "${gname}"`);
+    if (row.hidden) parts.push('hidden');
+  } else if (type === 'payees') {
+    if (row.transfer_acct) parts.push('transfer payee');
+  } else if (type === 'schedules') {
+    if (row.completed) parts.push('completed');
+    else if (typeof row.next_date === 'string') parts.push(`next ${row.next_date}`);
+  }
+  return parts.join(', ');
 }
 
 /**
@@ -5056,7 +5953,7 @@ export async function getAccountGroups(): Promise<any[]> {
   });
 }
 
-export async function createAccountGroup(group: { name: string; sort_order?: number }): Promise<string> {
+export async function createAccountGroup(group: { name: string }): Promise<string> {
   observability.incrementToolCall('actual.account_groups.create').catch(() => {});
   return queueWriteOperation(async () => {
     const raw = await withConcurrency(() => retry(() => rawCreateAccountGroup(group) as Promise<string | { id?: string }>, { retries: 2, backoffMs: 200, isRetryable: isRetryableError }));
@@ -5065,7 +5962,7 @@ export async function createAccountGroup(group: { name: string; sort_order?: num
   }, { preservesListings: PRESERVES_ALL_ENTITY_LISTINGS });
 }
 
-export async function updateAccountGroup(id: string, fields: { name?: string; sort_order?: number }): Promise<void> {
+export async function updateAccountGroup(id: string, fields: { name: string }): Promise<void> {
   observability.incrementToolCall('actual.account_groups.update').catch(() => {});
   return queueWriteOperation(async () => {
     // Read, decide and write inside ONE queued operation, so the existence check and the
@@ -5109,8 +6006,22 @@ export async function getTags(): Promise<any[]> {
 export async function createTag(tag: { tag: string; color?: string; description?: string }): Promise<string> {
   observability.incrementToolCall('actual.tags.create').catch(() => {});
   return queueWriteOperation(async () => {
+    // #700: upstream createTag is an upsert by name that writes colour and description as
+    // null when they are not supplied, so a bare repeat create wiped both. Fill each OMITTED
+    // field (=== undefined; an explicit '' replaces) from the live row with exactly this name
+    // (no trim, no case folding: the tags table is case sensitive). A deleted name is not
+    // listed, so it is revived with only the supplied fields. The listing sits OUTSIDE the
+    // retry around the raw create: a retried create must not list again.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const raw = await withConcurrency(() => retry(() => rawCreateTag(tag) as Promise<string | { id?: string }>, { retries: 2, backoffMs: 200, isRetryable: isRetryableError }));
+    const tags = await withConcurrency(() => retry(() => rawGetTags() as Promise<any[]>, { retries: 2, backoffMs: 200 }));
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const existing = (tags as any[]).find((t: any) => t.tag === tag.tag);
+    const payload = { ...tag };
+    if (existing) {
+      if (payload.color === undefined && typeof existing.color === 'string') payload.color = existing.color;
+      if (payload.description === undefined && typeof existing.description === 'string') payload.description = existing.description;
+    }
+    const raw = await withConcurrency(() => retry(() => rawCreateTag(payload) as Promise<string | { id?: string }>, { retries: 2, backoffMs: 200, isRetryable: isRetryableError }));
     return normalizeToId(raw);
   }, { preservesListings: PRESERVES_ALL_ENTITY_LISTINGS });
 }
@@ -5125,7 +6036,32 @@ export async function updateTag(id: string, fields: { tag?: string; color?: stri
     if (!exists) {
       throw new NotFoundRefusal('Tag', id, 'actual_tags_list');
     }
-    await withConcurrency(() => retry(() => rawUpdateTag(id, fields) as Promise<void>, { retries: 0, backoffMs: 200, isRetryable: isRetryableError }));
+    // #701: `tags.tag` is UNIQUE (case sensitive) and upstream's updateTag is a bare db update, so a
+    // rename onto a name another tag has used to surface the raw `SyncError: invalid-schema`.
+    // A LIVE holder of the name is in the listing above: refuse before the write. The tag's own
+    // current name is not a conflict.
+    const newName = fields.tag;
+    if (newName !== undefined) {
+      const holder = (tags as any[]).find((t: any) => t.id !== id && t.tag === newName);
+      if (holder) {
+        throw new ConflictRefusal(`A tag named "${newName}" already exists (id ${holder.id}). Choose another name. Nothing was written.`);
+      }
+    }
+    try {
+      await withConcurrency(() => retry(() => rawUpdateTag(id, fields) as Promise<void>, { retries: 0, backoffMs: 200, isRetryable: isRetryableError }));
+    } catch (err: any) {
+      // A DELETED tag keeps its name in the UNIQUE column and getTags never lists it, so that
+      // collision can only be recognised from the failed write. Upstream throws `invalid-schema`
+      // for EVERY failed local write; the SQLite constraint text in meta.error.message is the only
+      // discriminator it gives (probed on @actual-app/api 26.11.0), and `meta` may carry no `error`.
+      // A name another client created between the listing and this write would land here too and
+      // be reported as a deleted tag; the advice (choose another name) still holds.
+      const detail = err?.meta?.error?.message;
+      if (newName !== undefined && err?.reason === 'invalid-schema' && typeof detail === 'string' && detail.includes('UNIQUE')) {
+        throw new ConflictRefusal(`The tag name "${newName}" belongs to a deleted tag. Create a tag with that name to revive it, or choose another name. Nothing was written.`);
+      }
+      throw err;
+    }
   }, { preservesListings: PRESERVES_ALL_ENTITY_LISTINGS });
 }
 
@@ -5164,8 +6100,7 @@ const BUDGET_MONTH_NOTE_RE = /^budget-\d{4}-\d{2}$/;
  * snapshot the write lands on.
  *
  * The refusal is a NotFoundRefusal so the tool can recognise it by type (#377). The tool
- * converts it to its published `{ error }` shape, which is a known deviation from the
- * refusal taxonomy and is tracked on #377 rather than changed here.
+ * lets it propagate.
  */
 export async function updateNote(id: string, note: string): Promise<void> {
   observability.incrementToolCall('actual.notes.update').catch(() => {});
@@ -5228,17 +6163,18 @@ export async function exportBudget(): Promise<Uint8Array> {
  * budget rather than returning the first one's id. Guarded by
  * `tests/unit/adapter_nonidempotent_no_retry.test.js`.
  *
- * Side effect worth knowing at every call site: upstream `importBudget` LOADS the
- * imported budget, so the session's active budget changes to the new file. It is
- * therefore outside the `BUDGET_N_*` registry and outside whatever budget the ACL
- * resolved for this request. The resulting budget is un-ACL'd because it did not
- * exist when the ACL was built, so a RESTRICTED caller is refused outright (#570),
- * before any lock or upstream call. Wildcard and unrestricted callers can still
- * import; the write queue also enforces the ACL on their active budget.
+ * What a call does (#687, verified live): upstream `importBudget` closes the open
+ * budget and loads the imported one, but only for the duration. `importBudgetTracked`
+ * records an `imported:` sentinel, so the next operation of every session reloads
+ * that session's own configured budget: the session's active budget does NOT change.
+ * The imported budget is outside the `BUDGET_N_*` registry and un-ACL'd, because it
+ * did not exist when the ACL was built, so a RESTRICTED caller is refused outright
+ * (#570), before any lock or upstream call. Wildcard and unrestricted callers can
+ * still import; the write queue also enforces the ACL on their active budget.
  *
- * Upstream creates a NEW cloud file for the import (fresh id, best-effort upload),
- * so it never overwrites another budget on the server. The local copy is keyed by
- * the archive's own id, so an archive of budget X replaces X's LOCAL copy.
+ * Nothing is overwritten. Upstream passes no local id, so the archive lands in a NEW
+ * local directory beside the existing copies, and it creates a NEW cloud file
+ * (best-effort upload), so it never replaces another budget locally or on the server.
  */
 export async function importBudget(
   input: string | Uint8Array,
@@ -5422,6 +6358,7 @@ export default {
   runQuery,
   runBankSync,
   getBudgets,
+  listRemoteBudgetFiles,
   switchBudget,
   getBudgetRegistry,
   getIDByName,

@@ -6,7 +6,7 @@ Utility and build scripts. All are invoked via `package.json` scripts or from wi
 
 | Script | npm script | Purpose |
 |---|---|---|
-| `deploy-and-test.sh` | `npm run deploy:full` / `npm run deploy:smoke` | **Periodic maintenance script.** Syncs latest dev code → rebuilds MCP Docker image → pulls latest upstream images (Actual Budget, LibreChat, LobeChat) → independently restarts each service → waits for MCP health → runs the full integration test suite with auto-cleanup. Requires all four services to already be installed and running. See `$DOCKER_DIR/README.md` and sub-folder READMEs for setup instructions. |
+| `deploy-and-test.sh` | `npm run deploy:full` / `npm run deploy:smoke` | **Periodic maintenance script.** Syncs latest dev code → rebuilds MCP Docker image → pulls the latest Actual Budget image → recreates the Actual server and both MCP containers → waits for MCP health → runs the full integration test suite with auto-cleanup. LibreChat and LobeChat are left untouched unless `--with-chat-clients` (or `DEPLOY_CHAT_CLIENTS=true`) is passed; then their images are pulled and they are recreated too. Requires the services it touches to already be installed. See `$DOCKER_DIR/README.md` and sub-folder READMEs for setup instructions. |
 | `refresh-test-budget-snapshot.mjs` | (called by `deploy-and-test.sh` step 8) | #595: re-uploads the disposable test budget with upstream `upload-budget` (same groupId) so a cold download replays only new messages, verifies the server file is unchanged and a second cold download replays at most `REFRESH_MAX_REPLAY` messages. Runs inside the bearer container: `docker exec -i -u app -w /app -e MCP_TEST_BUDGET_SYNC_ID=<id> actual-mcp-bearer-backend node --input-type=module - < scripts/refresh-test-budget-snapshot.mjs`. Exit 2/3/4 are refusals (designation, OIDC id, data dir), 5 a timeout. |
 
 ### Running deploy-and-test.sh
@@ -16,6 +16,11 @@ Utility and build scripts. All are invoked via `package.json` scripts or from wi
 bash scripts/deploy-and-test.sh          # defaults to 'smoke' level (no writes)
 bash scripts/deploy-and-test.sh full     # full CRUD + advanced tests
 bash scripts/deploy-and-test.sh smoke    # read-only sanity checks
+```
+
+**Also refreshing the chat clients (off by default):**
+```bash
+bash scripts/deploy-and-test.sh full --with-chat-clients
 ```
 
 **With bank sync testing enabled:**
@@ -71,12 +76,15 @@ bash scripts/deploy-and-test.sh full
 | Script | npm script | Purpose |
 |--------|-----------|---------|
 | `check-write-effect-audit.mjs` | `npm run audit:write-effect` | Reports when `docs/audit/write-effect-audit.md` was taken against an older `@actual-app/api` than the one installed, and names the dispositions that depend on upstream continuing to throw. **Exits 0 in every path, deliberately.** It runs in the NON-BLOCKING `api-surface-drift` lane and must never gate a build: a check whose result changes with no commit is exactly what killed the release train in #321. |
+| `changed-line-coverage.mjs` | `npm run test:coverage` | #720: warn-only report of which CHANGED `src/` lines the unit and adapter suites execute. `--collect` builds with inline source maps, runs both suites under `NODE_V8_COVERAGE=coverage/v8`, then rebuilds plainly; without it the script reports from an existing `--coverage-dir`. `--base <ref>` (default `origin/develop`) or `--diff-file <path>` picks the diff, `--summary <file>` appends the table (CI passes `$GITHUB_STEP_SUMMARY`). No dependency and no threshold; missing data prints `skip:` and exits 0. See [testing-and-reliability](../docs/development/testing-and-reliability.md#measuring-coverage) |
 
 ## Documentation checks (#602)
 
 | Script | npm script | Purpose |
 |---|---|---|
-| `docs/check.mjs` | `npm run docs:check` / `npm run docs:gen` | The one orchestrator for documentation checks. Awaits an explicit module list (no directory scan), prints `<module>: <problem>` per problem and exits 1 on any. A module that needs a missing tool returns `skipped: { tool, reason }`: locally that prints `skip: <module>: <reason>`, and when `CI` is set it FAILS as `<module>: <tool> required but not found`. `--gen` (`docs:gen`) awaits each module's optional `generate()`; no module defines one yet. Run `npm run docs:check` after any doc change. Exports `run({ root, modules, env })` for `tests/unit/docs_check.test.js`. |
+| `docs/check.mjs` | `npm run docs:check` / `npm run docs:gen` | The one orchestrator for documentation checks. Awaits an explicit module list (no directory scan), prints `<module>: <problem>` per problem and exits 1 on any. A module that needs a missing tool returns `skipped: { tool, reason }`: locally that prints `skip: <module>: <reason>`, and when `CI` is set it FAILS as `<module>: <tool> required but not found`. `--gen` (`docs:gen`) awaits each module's optional `generate()` (the `tools` module does). Run `npm run docs:check` after any doc change. Exports `run({ root, modules, env })` for `tests/unit/docs_check.test.js`. |
+| `docs/capabilities.mjs` | `npm run docs:gen` (via the `tools` module) | #668: pure renderers for the README capabilities blocks (tools by domain, prompts table, toolset size table). Nothing here reads files or prints. |
+| `measure-tools-list-size.mjs` | `node scripts/measure-tools-list-size.mjs` | #668: measures the `tools/list` bytes of six configurations offline (one child process each, needs `npm run build`) and writes `scripts/docs/tools-list-sizes.json`; `--check` exits 1 when the JSON is stale. Guarded by `tests/unit/tools_list_sizes_sync.test.js`. |
 | `docs/links.mjs` | (module of `docs:check`) | Runs lychee `--offline --include-fragments` over every markdown file the markers enumerator lists, excluding the negative fixture `tests/fixtures/lychee/`. Reports `<file>:<line> <url> (<reason>)`. Without `--include-fragments` a link to a deleted heading passes; `tests/unit/docs_links_fixture.test.js` proves it. Skips (loudly) without `lychee` on `PATH`; CI installs lychee v0.24.2 in the `Docs check` job. |
 | `docs/markers.mjs` | (module of `docs:check`) | Fails on a numeric `**Version:**` or `**Tool Count:**` marker in any markdown file OUTSIDE the set `version-bump.js` rewrites (root `README.md`, top-level `docs/*.md`, `.github/copilot-instructions.md`), because there it freezes silently. Lists files with `git ls-files` when the root is a checkout's toplevel, and with a recursive walk otherwise (test temp trees). |
 

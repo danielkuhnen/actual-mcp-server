@@ -252,6 +252,40 @@ console.log('\n[#522] batch refusal suffix and forced shutdown on abort');
   }
 }
 
+console.log('\n[#710] array and boolean condition values are checked per item');
+{
+  const cond = (c) => ({ conditions: [c], actions: [NOTE('x')] });
+  const res = await run([
+    cond({ field: 'category', op: 'oneOf', value: [CAT] }),
+    cond({ field: 'category', op: 'oneOf', value: [] }),
+    cond({ field: 'cleared', op: 'is', value: true }),
+    cond({ field: 'cleared', op: 'is', value: 'true' }),
+    cond({ field: 'category', op: 'is', value: [CAT] }),
+    cond({ field: 'notes', op: 'is', value: false }),
+  ]);
+  check(res.succeeded.map((s) => s.index).join() === '0,2' && created.length === 2, 'the array rule and the boolean rule are created (indices 0 and 2)', JSON.stringify(res));
+  const err = (i) => res.failed.find((f) => f.index === i)?.error ?? '';
+  check(err(1).includes('requires a non-empty array'), 'NEGATIVE: item 1 (oneOf []) fails with its message', err(1));
+  check(err(3).includes('must be true or false'), 'NEGATIVE: item 3 (cleared is "true") fails with its message', err(3));
+  check(err(4).includes('does not accept an array'), 'NEGATIVE: item 4 (an array on is) fails with its message', err(4));
+  check(err(5).includes('does not accept a boolean'), 'NEGATIVE: item 5 (a boolean on notes) fails with its message', err(5));
+}
+
+console.log('\n[#711] the shared operator map is applied per item');
+{
+  const cond = (c) => ({ conditions: [c], actions: [NOTE('x')] });
+  const res = await run([
+    cond({ field: 'amount', op: 'isbetween', value: { num1: 1000, num2: 5000 } }),
+    cond({ field: 'nosuchfield', op: 'is', value: 'x' }),
+    cond({ field: 'payee_name', op: 'contains', value: 'amazon' }),
+  ]);
+  check(res.succeeded.map((s) => s.index).join() === '0,2' && created.length === 2, 'amount isbetween and payee_name contains are created (indices 0 and 2)', JSON.stringify(res));
+  check(JSON.stringify(created[0]?.conditions?.[0]?.value) === JSON.stringify({ num1: 1000, num2: 5000 }), '  and the range reaches the raw create unchanged');
+  const err = res.failed.find((f) => f.index === 1)?.error ?? '';
+  check(err === 'Unknown condition field "nosuchfield". Valid fields: imported_payee, payee, payee_name, account, category, category_group, notes, amount, date, cleared, reconciled.',
+    'NEGATIVE: item 1 (an unknown field) fails with the exact message', err);
+}
+
 if (failures > 0) { console.error(`\n${failures} check(s) failed`); process.exit(1); }
 console.log('\nAll rules_create_batch checks passed');
 process.exit(0);

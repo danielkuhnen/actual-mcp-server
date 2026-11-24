@@ -6,9 +6,10 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import {
   ListToolsRequestSchema,
-  CallToolRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import logger, { resolveRequestId } from '../logger.js';
+import { registerPromptHandlers } from '../lib/promptHandlers.js';
+import type { PromptDefinition } from '../prompts/registry.js';
 import { attachTransportErrorLogger } from '../lib/transportErrorLogger.js';
 import { SERVER_NAME } from '../lib/mcp-version.js';
 import { createModuleLogger } from '../lib/loggerFactory.js';
@@ -16,12 +17,13 @@ import { getLocalIp } from '../utils.js';
 import actualToolsManager from '../actualToolsManager.js';
 import { getConnectionState, connectToActualForSession, shutdownActualForSession, shutdownActual, admitSession, releaseAdmission, isConnectionPoolEnabled } from '../actualConnection.js';
 import { connectionPool, type EvictionReason } from '../lib/ActualConnectionPool.js';
-import { clearSessionBudgetState, setSessionLivenessCheck, initialBudgetForSession, getBudgetRegistry, awaitWritesIdle } from '../lib/actual-adapter.js';
+import { clearSessionBudgetState, setSessionLivenessCheck, initialBudgetForSession, pinSessionBudget, isConfiguredBudget, isSelectableBudget, getBudgetRegistry, awaitWritesIdle } from '../lib/actual-adapter.js';
 import { errorLogFields } from '../lib/errors.js';
 import observability from '../observability.js';
 import config from '../config.js';
 import { createRemoteJWKSet, jwtVerify } from 'jose';
-import { TokenVerificationError } from '../auth/bearer.js';
+import { TokenVerificationError, bearerChallenge, resourceMetadataEndpoint } from '../auth/bearer.js';
+import { advertisedUrlFor } from '../lib/advertised-url.js';
 import { createMcpAuth } from '../auth/setup.js';
 import { resolveJwksSource, buildTrustedJwksHosts, setResolvedOidcMetadata } from '../lib/oidc-discovery.js';
 import { createAssertionPromotionMiddleware } from '../lib/oidc-token-source.js';
@@ -44,10 +46,12 @@ import * as fs from 'node:fs';
 // so adapter code can import it without a circular dependency on httpServer.
 // Re-exported here for backward compatibility with any callers that imported
 // `requestContext` from this module.
-import { requestContext } from '../lib/requestContext.js';
+import { requestContext, type RequestStore } from '../lib/requestContext.js';
 import { createShutdownGate, createShutdownHandler } from './shutdown.js';
 import { recordSessionOwner, forgetSessionOwner, sessionOwnerMatches } from '../lib/session-owners.js';
 import { buildToolListEntries } from '../lib/tool-list-entry.js';
+import { executeToolCall, parseToolCallEnvelope } from '../lib/tool-output.js';
+import { registerToolCallHandler } from '../lib/register-tool-call.js';
 
 // #438 / #452: the init-failure classifier now lives in src/lib/init-failure.ts so BOTH
 // transports can reach it (stdio could not, which was the whole of #452). Re-exported here
@@ -99,6 +103,11 @@ export const HTTP_KEEP_ALIVE_TIMEOUT_MS = 65000;
  */
 const SHUTDOWN_DEADLINE_MS = 8000;
 
+function requestBudgetAccess(req: Request): Pick<RequestStore, 'allowedBudgets' | 'discoveredBudgets'> {
+  const { allowedBudgets, discoveredBudgets } = req as Request & RequestStore;
+  return { allowedBudgets, discoveredBudgets };
+}
+
 export async function startHttpServer(
   mcp: ActualMCPConnection,
   port: number,
@@ -112,6 +121,8 @@ export async function startHttpServer(
   bindHost = 'localhost',                        // #239: interface to bind; forwarded to listen()
   advertisedUrl?: string,
   onListening?: (facts: HttpListenerFacts) => void, // #623: index.ts logs sys_startup from here
+  outputSchemas: Record<string, unknown> = {},       // #642: published outputSchema per covered tool
+  offeredPrompts: readonly PromptDefinition[] = [],  // #660: resolved once in index.ts; LAST so positional callers still compile
 ) {
   // #572: resolve MCP_STATIC_TOKENS (token variables, budget names) before anything
   // binds, so a bad entry refuses startup like an unreadable TLS key. The registry is
@@ -436,6 +447,7 @@ export async function startHttpServer(
     schema:
       (toolSchemas && toolSchemas[name]) ||
       (actualToolsManager as unknown as { getToolSchema?: (n: string) => unknown })?.getToolSchema?.(name),
+    outputSchema: Object.hasOwn(outputSchemas, name) ? outputSchemas[name] : undefined,
   });
 
   // Session liveness and idle timing are owned solely by the connection pool
@@ -481,6 +493,7 @@ export async function startHttpServer(
       const subject = (req as Request & { auth?: { subject?: string } }).auth?.subject;
       if (subject) return true;
       logger.warn(`[OIDC] Rejected request with no verified principal (req.auth.subject missing) from ${req.ip || req.connection.remoteAddress}`);
+      res.set('WWW-Authenticate', bearerChallenge({ metadataUrl: config.OIDC_RESOURCE ? resourceMetadataEndpoint(config.OIDC_RESOURCE).href : undefined }));
       res.status(401).json({ error: 'Unauthorized: OIDC authentication required' });
       return false;
     }
@@ -496,6 +509,7 @@ export async function startHttpServer(
     const authHeader = req.headers.authorization;
     if (!authHeader) {
       logger.warn(`[HTTP] Unauthorized request from ${req.ip || req.connection.remoteAddress}: Missing Authorization header`);
+      res.set('WWW-Authenticate', bearerChallenge());
       res.status(401).json({ error: 'Unauthorized: Missing Authorization header' });
       return false;
     }
@@ -504,6 +518,7 @@ export async function startHttpServer(
     const match = authHeader.match(/^Bearer\s+(.+)$/i);
     if (!match) {
       logger.warn(`[HTTP] Unauthorized request from ${req.ip || req.connection.remoteAddress}: Invalid Authorization header format`);
+      res.set('WWW-Authenticate', bearerChallenge({ error: 'invalid_request' }));
       res.status(401).json({ error: 'Unauthorized: Invalid Authorization header format. Expected "Bearer <token>"' });
       return false;
     }
@@ -515,6 +530,7 @@ export async function startHttpServer(
 
     if (!hit) {
       logger.warn(`[HTTP] Unauthorized request from ${req.ip || req.connection.remoteAddress}: Invalid token`);
+      res.set('WWW-Authenticate', bearerChallenge({ error: 'invalid_token' }));
       res.status(401).json({ error: 'Unauthorized: Invalid token' });
       return false;
     }
@@ -534,7 +550,7 @@ export async function startHttpServer(
     // ensure capabilities.tools is an object mapping tool name -> {}
     const capabilitiesObj = capabilities && Object.keys(capabilities).length
       ? capabilities
-      : { tools: toolsList.reduce((acc: Record<string, object>, n: string) => { acc[n] = {}; return acc; }, {}) };
+      : { tools: toolsList.reduce((acc: Record<string, object>, n: string) => { acc[n] = {}; return acc; }, {}), prompts: {}, completions: {} };
 
     // Only the two ServerOptions the MCP spec defines (#560). tools/list is served by the
     // request handler, not by these options; the SDK ignored the extra keys this once passed.
@@ -561,29 +577,27 @@ export async function startHttpServer(
       return { tools };
     });
 
+    registerPromptHandlers(server, offeredPrompts);
+
     // Call tool handler -> proxy to mcp.executeTool or to actualToolsManager
     // Note: sessionId is available via requestContext.getStore() for tools that need it
-    server.setRequestHandler(CallToolRequestSchema, async (request: unknown) => {
-      const req = request as { params?: Record<string, unknown> } | undefined;
-      const params = req?.params ?? {};
-      const rawName = params.name;
-      const args = params.arguments;
-      if (typeof rawName !== 'string') {
-        throw new Error('Tool name must be a string');
-      }
-      const name = rawName;
+    registerToolCallHandler(server, async (request) => {
+      // #769: the envelope check and the error model (isError result vs -32602) are shared with
+      // stdio in tool-output.ts, so the two transports cannot drift.
+      const { name, args } = parseToolCallEnvelope(request?.params);
       // Tool name only: arguments are budget data and never reach the logs (#556).
       logger.debug(`[TOOL CALL] ${name}`);
-      // Prefer ActualMCPConnection executor if provided
-      if (typeof (mcp as unknown as { executeTool?: Function }).executeTool === 'function') {
-        const result = await (mcp as unknown as { executeTool?: (n: string, a?: unknown) => Promise<unknown> }).executeTool!(name, args ?? {});
-        return {
-          content: [{ type: 'text', text: typeof result === 'string' ? result : JSON.stringify(result) }],
-        };
-      }
       // There is deliberately no second dispatch path here (#483): actualToolsManager has
       // no `invoke`, and every call must go through callTool, which refuses unpublished tools.
-      throw new Error(`Tool executor not available for ${name}`);
+      // #642: shared framing; the verdict reaches here so structuredContent is not dropped. A
+      // connection without an executor is a wiring fault and stays a protocol error (-32603).
+      // #438 / #452 parity: a branded init failure gets the same fixed sentence stdio returns, so
+      // an upstream host and port never reach the model. The warn is structured and content-free.
+      return executeToolCall(mcp, name, args, {
+        onInitFailure: (cause) => {
+          logger.warn('[HTTP] tool call failed while establishing the Actual connection', { tool: name, cause });
+        },
+      });
     });
 
     return { server };
@@ -752,17 +766,36 @@ export async function startHttpServer(
                 // #571: open on the session's own budget (a restored #189 preference may live on
                 // another server), not on the default one.
                 const budget = initialBudgetForSession(sid);
-                await connectToActualForSession(sid, {
-                  serverUrl: budget.serverUrl,
-                  password: budget.password || '',
-                  syncId: budget.syncId,
-                  encryptionPassword: budget.encryptionPassword,
-                });
-                // Only register the transport if the pool connection succeeded.
-                // The pool stamped lastActivity when it created the entry, so it
-                // is already the source of truth for this session's idle clock.
+                const discovery = requestContext.getStore()?.discoveredBudgets !== undefined && config.AUTH_BUDGET_DISCOVERY;
+                const selectable = !discovery || isSelectableBudget(budget);
+                let opened = false;
+                if (selectable) {
+                  try {
+                    await connectToActualForSession(sid, {
+                      serverUrl: budget.serverUrl,
+                      password: budget.password || '',
+                      syncId: budget.syncId,
+                      encryptionPassword: budget.encryptionPassword,
+                    });
+                    opened = true;
+                  } catch (err) {
+                    if (!discovery || isConfiguredBudget(budget)) throw err;
+                    logger.warn('[SESSION] Could not open the discovered starting budget', {
+                      syncId: budget.syncId, errorClass: err instanceof Error ? err.name : 'Unknown',
+                    });
+                    if (!admitSession(sid, capPrincipal(req)).admitted) throw err;
+                  }
+                }
                 recordSessionOwner(sid, sessionOwner);
                 transports.set(sid, transport);
+                if (discovery && opened) {
+                  pinSessionBudget(sid, budget);
+                  // Audit record of an automatic start: the Sync ID and where the choice came from,
+                  // never the file name (a discovered file is named by its owner).
+                  logger.info('[SESSION] Starting budget selected', {
+                    syncId: budget.syncId, source: isConfiguredBudget(budget) ? 'configured' : 'discovered',
+                  });
+                }
                 // #530: let the pool time this session even after its entry is recycled.
                 // Pooling off (USE_CONNECTION_POOL=false) has no sweep, so nothing to register.
                 if (isConnectionPoolEnabled()) connectionPool.registerSession(sid);
@@ -791,9 +824,8 @@ export async function startHttpServer(
           try {
             // Run in AsyncLocalStorage context so tools can access sessionId
             // and the adapter can enforce per-request budget ACL (#156).
-            const allowedBudgetsInit = (req as Request & { allowedBudgets?: string[] }).allowedBudgets;
             const requestId = resolveRequestId(req.get('x-correlation-id'));
-            await requestContext.run({ sessionId: undefined, requestId, allowedBudgets: allowedBudgetsInit, principal: resolvePrincipal(req) }, async () => {
+            await requestContext.run({ sessionId: undefined, requestId, ...requestBudgetAccess(req), principal: resolvePrincipal(req) }, async () => {
               await transport.handleRequest(req, res, req.body);
             });
           } catch (err: unknown) {
@@ -952,9 +984,8 @@ export async function startHttpServer(
 
       // Run in AsyncLocalStorage context so tools and the adapter can access
       // sessionId (pool branch, #134) and allowedBudgets (ACL enforcement, #156).
-      const allowedBudgets = (req as Request & { allowedBudgets?: string[] }).allowedBudgets;
       const requestId = resolveRequestId(req.get('x-correlation-id'));
-      await requestContext.run({ sessionId, requestId, allowedBudgets, principal: resolvePrincipal(req) }, async () => {
+      await requestContext.run({ sessionId, requestId, ...requestBudgetAccess(req), principal: resolvePrincipal(req) }, async () => {
         await transport.handleRequest(req, res, req.body);
       });
     } catch (err: unknown) {
@@ -1096,9 +1127,8 @@ export async function startHttpServer(
         res.status(404).json(sessionNotFound);
         return;
       }
-      const allowedBudgets = (req as Request & { allowedBudgets?: string[] }).allowedBudgets;
       const requestId = resolveRequestId(req.get('x-correlation-id'));
-      await requestContext.run({ sessionId, requestId, allowedBudgets, principal: resolvePrincipal(req) }, async () => {
+      await requestContext.run({ sessionId, requestId, ...requestBudgetAccess(req), principal: resolvePrincipal(req) }, async () => {
         await transport.handleRequest(req, res);
       });
       if (res.statusCode !== 200) return;
@@ -1133,15 +1163,26 @@ export async function startHttpServer(
   // authorization server to advertise), and in OIDC mode mcpAuth.protectedResourceMetadataRouter()
   // (registered above) still serves the compliant RFC 9728 document.
   const serverIp = process.env.MCP_BRIDGE_PUBLIC_HOST || getLocalIp();
-  const mcpInfo = () => ({
+  const publicHostConfigured = !!process.env.MCP_BRIDGE_PUBLIC_HOST?.trim();
+  const mcpInfo = (req: Request) => ({
     description: serverDescription || "Actual MCP server",
     instructions,
     capabilities: capabilities && Object.keys(capabilities).length ? capabilities : { tools: toolsList.reduce((a: Record<string, object>, n: string) => ({ ...a, [n]: {} }), {}) },
     tools: toolsList,
-    advertisedUrl: advertisedUrl || `${scheme}://${serverIp}:${port}${httpPath}`,
+    // #777: the address the caller used, from a validated Host header; undefined (key dropped)
+    // when it is missing or invalid. MCP_BRIDGE_PUBLIC_HOST, when set, keeps the old value.
+    advertisedUrl: advertisedUrlFor({
+      publicHostConfigured,
+      startupUrl: advertisedUrl,
+      hostHeader: req.headers.host,
+      fallbackScheme: scheme,
+      httpPath,
+      configuredFallbackUrl: `${scheme}://${serverIp}:${port}${httpPath}`,
+    }),
   });
-  app.get('/mcp-info', (_req, res) => { res.json(mcpInfo()); });
-  app.get('/mcp-info/http', (_req, res) => { res.json(mcpInfo()); });
+  const mcpInfoRoute = (req: Request, res: Response) => { res.set('Vary', 'Host'); res.json(mcpInfo(req)); };
+  app.get('/mcp-info', mcpInfoRoute);
+  app.get('/mcp-info/http', mcpInfoRoute);
 
   // /health is unauthenticated, so it reports counts only. Session ids are bearer
   // material for the transport and must never appear here; getConnectionState
@@ -1256,8 +1297,9 @@ export async function startHttpServer(
     // mutate it mid-iteration.
     for (const sessionId of [...transports.keys()]) {
       await shutdownActualForSession(sessionId);
+      // A session without a pool entry has no eviction callback to finish its teardown.
+      if (transports.has(sessionId)) teardownSession(sessionId, 'closed');
     }
-    transports.clear();
     sessionInitPromises.clear();
     sessionInitFailures.clear(); // #438
     // Also shut down the shared/pooled connections

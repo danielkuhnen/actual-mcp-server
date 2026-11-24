@@ -12,6 +12,9 @@ import { attachProcessLogger } from './lib/processHandlersInstall.js';
 import { getMcpServerVersion } from './lib/mcp-version.js';
 import path from 'node:path';
 import { z } from 'zod';
+import { outputJsonSchema } from './lib/tool-output.js';
+import { PROMPT_DEFINITIONS } from './prompts/index.js';
+import { resolveOfferedPrompts } from './prompts/registry.js';
 import { buildServerInstructions } from './lib/serverInstructions.js';
 import { format } from 'node:util';
 import { writeSync } from 'node:fs';
@@ -240,6 +243,10 @@ export {};
       actualToolsManager.getToolPolicy().readOnly,
     );
 
+    // #660: the prompts offered, resolved ONCE from the published tool list and handed to every
+    // start call below (the #560 `instructions` precedent), so no transport resolves policy.
+    const offeredPrompts = resolveOfferedPrompts(PROMPT_DEFINITIONS, new Set(implementedTools));
+
     // Extract schemas map with tool name → JSON schema
     const toolSchemas: Record<string, unknown> = {};
     for (const toolName of implementedTools) {
@@ -249,12 +256,21 @@ export {};
       }
     }
 
+    // #642: published outputSchema per covered tool, computed once and handed to BOTH
+    // transports through one parameter so they cannot be wired differently.
+    const outputSchemas: Record<string, unknown> = {};
+    for (const toolName of implementedTools) {
+      const published = outputJsonSchema(actualToolsManager.getTool(toolName));
+      if (published !== undefined) outputSchemas[toolName] = published;
+    }
+
     // Capabilities object with your fixed capabilities values
     const rawCapabilities = {
       tools: true,
       logging: false,
       events: false,
-      prompts: false,
+      prompts: true,
+      completions: true,
     };
 
     // Convert to MCP format (object for each capability)
@@ -349,7 +365,10 @@ export {};
         toolSchemas,
         version,
         bindHost,
-        advertisedUrl
+        advertisedUrl,
+        undefined,
+        outputSchemas,
+        offeredPrompts,
       );
 
       // dynamic import to avoid circular at top
@@ -446,6 +465,8 @@ export {};
         (listener) => {
           void emitStartupRecord({ kind: 'http', bindHost, path: HTTP_PATH, advertisedUrl, listener });
         },
+        outputSchemas,
+        offeredPrompts,
       );
     } else if (useStdio) {
       logger.debug('Mode: stdio');
@@ -457,6 +478,8 @@ export {};
         serverInstructionsText,
         toolSchemas,
         version,
+        outputSchemas,
+        offeredPrompts,
       );
       await emitStartupRecord({ kind: 'stdio' });
     } else {

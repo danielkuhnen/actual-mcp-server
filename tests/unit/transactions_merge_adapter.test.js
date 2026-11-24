@@ -30,7 +30,13 @@ const ACCT2 = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
   let rows = [];
   let mergeCalls = [];
   let mergeReturn = B;
-  apiDefault.runQuery = async () => ({ data: rows });
+  // The stub returns only the columns the query selects, as the real server does, so
+  // dropping a column a guard reads (transfer_id, #794) turns its cases red.
+  apiDefault.runQuery = async (query) => {
+    const cols = query?.state?.selectExpressions;
+    if (!Array.isArray(cols) || cols.length === 0 || cols.includes('*')) return { data: rows };
+    return { data: rows.map((r) => Object.fromEntries(cols.filter((c) => c in r).map((c) => [c, r[c]]))) };
+  };
   apiDefault.mergeTransactions = async (...args) => { mergeCalls.push(args); return mergeReturn; };
   apiDefault.sync = async () => {};
 
@@ -90,6 +96,41 @@ const ACCT2 = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
     e = await refusal([A, B]);
     check(errors.isPreflightRefusal(e) && /split child/i.test(e.message), 'split child (parent_id only) is refused', e?.message);
     check(mergeCalls.length === 0, 'parent_id child: raw merge not called');
+  }
+
+  console.log('\n[#794] mergeTransactions: a shared transfer counterpart is refused');
+  {
+    const X = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+    const Y = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
+    reset([row(A, { transfer_id: X }), row(B, { transfer_id: X })]);
+    let e = await refusal([A, B]);
+    check(errors.isPreflightRefusal(e) && e instanceof errors.OutOfRangeRefusal, 'shared counterpart is an OutOfRangeRefusal', String(e));
+    check(e && e.message.includes(A) && e.message.includes(B) && e.message.includes(X), 'message names both ids and the counterpart', e?.message);
+    check(e && e.message.includes('would delete that counterpart') && e.message.includes('Nothing was changed'), 'message states the consequence', e?.message);
+    check(mergeCalls.length === 0, 'shared counterpart: raw merge not called');
+
+    reset([row(A, { transfer_id: X }), row(B, { transfer_id: Y })]);
+    await adapter.mergeTransactions([A, B]);
+    check(mergeCalls.length === 1, 'distinct counterparts still reach the raw merge');
+
+    reset([row(A, { transfer_id: X }), row(B, { transfer_id: null })]);
+    await adapter.mergeTransactions([A, B]);
+    check(mergeCalls.length === 1, 'one transfer row plus one plain row still reaches the raw merge');
+
+    reset([row(A, { transfer_id: null }), row(B, { transfer_id: null })]);
+    await adapter.mergeTransactions([A, B]);
+    check(mergeCalls.length === 1, 'two null transfer_id values are not shared');
+
+    reset([row(A, { transfer_id: '' }), row(B, { transfer_id: '' })]);
+    await adapter.mergeTransactions([A, B]);
+    check(mergeCalls.length === 1, 'two empty-string transfer_id values are not shared');
+
+    reset([row(A, { transfer_id: X }), row(B, { transfer_id: X, amount: -1200 })]);
+    e = await refusal([A, B]);
+    check(e && e.message.includes('different amounts'), 'different amounts is still reported before the shared counterpart', e?.message);
+    reset([row(A, { transfer_id: X }), row(B, { transfer_id: X, account: ACCT2 })]);
+    e = await refusal([A, B]);
+    check(e && e.message.includes('different accounts'), 'different accounts is still reported before the shared counterpart', e?.message);
   }
 
   if (failures) { console.error(`\n${failures} failure(s)`); process.exit(1); }

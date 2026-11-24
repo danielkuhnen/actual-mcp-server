@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import type { ToolDefinition } from '../../types/tool.d.js';
 import adapter from '../lib/actual-adapter.js';
-import { CommonSchemas } from '../lib/schemas/common.js';
+import { CommonSchemas, oneOffDateSchema } from '../lib/schemas/common.js';
 import { RecurConfigSchema } from '../lib/schemas/recur.js';
 import { ScheduleAmountSchema, amountOpMismatch } from '../lib/schemas/schedule-amount.js';
 
@@ -18,8 +18,7 @@ const InputSchema = z.strictObject({
   amountOp: z.enum(['is', 'isapprox', 'isbetween']).optional()
     .describe('How to match the amount'),
   date: z.union([
-    z.string().regex(/^\d{4}-\d{2}-\d{2}$/)
-      .describe('One-off schedule on this date'),
+    oneOffDateSchema.describe('One-off schedule on this date'),
     RecurConfigSchema
       .describe('Recurring schedule'),
   ]).optional()
@@ -42,7 +41,7 @@ const InputSchema = z.strictObject({
 
 const tool: ToolDefinition = {
   name: 'actual_schedules_update',
-  description: `Update a schedule; supply only the fields to change. A new date replaces the stored recurrence, patterns included. Set resetNextDate: true when changing the date or recurrence. Completion and next_date are managed by Actual and cannot be set.`,
+  description: `Update a schedule; supply only the fields to change. A new date replaces the stored recurrence, patterns included. Set resetNextDate: true when changing the date or recurrence. An unknown account or payee id is refused. Completion and next_date are managed by Actual and cannot be set.`,
   inputSchema: InputSchema,
   call: async (args: unknown, _meta?: unknown) => {
     const input = InputSchema.parse(args || {});

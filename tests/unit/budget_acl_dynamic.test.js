@@ -210,24 +210,62 @@ const AUTHENTIK_TOKEN = {
     check(nullResult.length === 0 && !nullResult.includes('*'), 'a null principal denies, never a wildcard');
 
     const adapterMod = await import('../../dist/src/lib/actual-adapter.js');
-    const orig = adapterMod.default.getBudgets;
+    const orig = adapterMod.default.listRemoteBudgetFiles;
 
-    adapterMod.default.getBudgets = async () => { throw new Error('ECONNREFUSED'); };
+    adapterMod.default.listRemoteBudgetFiles = async () => { throw new Error('ECONNREFUSED'); };
     _resetDynamicAclCache();
     const errResult = await resolveAllowedBudgetsFromActual(ALICE);
     check(errResult.length === 0 && !errResult.includes('*'), 'an upstream failure denies, never a wildcard');
 
-    adapterMod.default.getBudgets = async () => FILES;
+    adapterMod.default.listRemoteBudgetFiles = async () => FILES;
     _resetDynamicAclCache();
     check(JSON.stringify(await resolveAllowedBudgetsFromActual(ALICE)) === JSON.stringify([FILE_A]),
       'resolves alice through the real code path');
 
-    adapterMod.default.getBudgets = async () => { throw new Error('should not be called'); };
+    adapterMod.default.listRemoteBudgetFiles = async () => { throw new Error('should not be called'); };
     check(JSON.stringify(await resolveAllowedBudgetsFromActual(ALICE)) === JSON.stringify([FILE_A]),
       'a second call is served from cache');
 
-    adapterMod.default.getBudgets = orig;
+    adapterMod.default.listRemoteBudgetFiles = orig;
     _resetDynamicAclCache();
+  }
+
+  console.log('\n[budget-acl-dynamic] household sharing refreshes independently for each principal');
+  {
+    const adapter = (await import('../../dist/src/lib/actual-adapter.js')).default;
+    const listing = 'listRemoteBudgetFiles' in adapter ? 'listRemoteBudgetFiles' : 'getBudgets';
+    const originalGetBudgets = adapter[listing];
+    const originalNow = Date.now;
+    let now = originalNow();
+    const household = {
+      groupId: 'household-sync', name: 'Household', state: 'remote',
+      usersWithAccess: [{ userName: ALICE, owner: true }],
+    };
+    try {
+      _resetDynamicAclCache();
+      Date.now = () => now;
+      adapter[listing] = async () => [...FILES, household];
+      async function expectAllowed(principal, expected, label) {
+        const actual = await resolveAllowedBudgetsFromActual(principal);
+        check(JSON.stringify([...actual].sort()) === JSON.stringify([...expected].sort()), label);
+      }
+      await expectAllowed(ALICE, [FILE_A, household.groupId], 'the owner sees her private and household budgets');
+      await expectAllowed(BOB, [FILE_B], 'the second principal starts with only his private budget');
+
+      household.usersWithAccess.push({ userName: BOB, owner: false });
+      now += 60_000;
+      await expectAllowed(BOB, [FILE_B, household.groupId], 'a new share reaches the second principal by cache expiry');
+      await expectAllowed(ALICE, [FILE_A, household.groupId], 'the owner still cannot see the other private budget');
+
+      household.usersWithAccess = household.usersWithAccess.filter(user => user.userName !== BOB);
+      now += 60_000;
+      await expectAllowed(BOB, [FILE_B], 'revoking the share removes it from the refreshed allowlist');
+      await expectAllowed(ALICE, [FILE_A, household.groupId], 'the owner retains access after the revocation');
+    } finally {
+      Date.now = originalNow;
+      adapter[listing] = originalGetBudgets;
+      _resetDynamicAclCache();
+    }
   }
 
   console.log('\n[budget-acl-dynamic] defaults');

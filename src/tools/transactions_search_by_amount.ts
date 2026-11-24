@@ -1,14 +1,17 @@
 import { z } from 'zod';
 import type { ToolDefinition } from '../../types/tool.d.js';
 import adapter from '../lib/actual-adapter.js';
+import { CommonSchemas } from '../lib/schemas/common.js';
 import { isPreflightRefusal } from '../lib/errors.js';
+import { expandSplitsForSearch } from '../lib/split-search.js';
+import { idSetByName } from '../lib/actual-adapter/filter-ids.js';
 
 const InputSchema = z.object({
   minAmount: z.number().optional().describe('Minimum amount in cents (use negative for expenses, e.g., -10000 for $-100.00). For expenses, use negative values (e.g., -5000 for -$50.00)'),
   maxAmount: z.number().optional().describe('Maximum amount in cents (e.g., 10000 for $100.00). For expenses, use negative values (e.g., -5000 for -$50.00)'),
   absoluteAmount: z.number().optional().describe('Optional: Search by absolute value (magnitude) in cents, ignoring sign. E.g., 5000 will match both +$50.00 (income) and -$50.00 (expense). If specified, minAmount/maxAmount are ignored.'),
-  startDate: z.string().optional().describe('Optional: Start date in YYYY-MM-DD format'),
-  endDate: z.string().optional().describe('Optional: End date in YYYY-MM-DD format'),
+  startDate: CommonSchemas.date.optional().describe('Optional: Start date in YYYY-MM-DD format'),
+  endDate: CommonSchemas.date.optional().describe('Optional: End date in YYYY-MM-DD format'),
   accountId: z.string().optional().describe('Optional: Filter by specific account ID'),
   categoryName: z.string().optional().describe('Optional: Filter by category name'),
   limit: z.number().optional().default(100).describe('Optional: Maximum number of transactions to return (default: 100)'),
@@ -16,7 +19,7 @@ const InputSchema = z.object({
 
 const tool: ToolDefinition = {
   name: 'actual_transactions_search_by_amount',
-  description: 'Search transactions by amount. Supports two modes: (1) Signed amount range using minAmount/maxAmount (expenses are negative, e.g., -5000 for -$50), or (2) Absolute value using absoluteAmount to find any transaction with that magnitude regardless of sign (e.g., absoluteAmount=5000 matches both +$50 income and -$50 expense). When user says "amount 50", use absoluteAmount=5000 to match both income and expenses.',
+  description: 'Search transactions by amount. Supports two modes: (1) Signed amount range using minAmount/maxAmount (expenses are negative, e.g., -5000 for -$50), or (2) Absolute value using absoluteAmount to find any transaction with that magnitude regardless of sign (e.g., absoluteAmount=5000 matches both +$50 income and -$50 expense). When user says "amount 50", use absoluteAmount=5000 to match both income and expenses. Returns up to limit rows (default 100) as { transactions, count, totalAmount, hasMore }; count and totalAmount cover only the returned rows, hasMore is true when more matched. With categoryName, a split is matched by its children; rows carry parent_id.',
   inputSchema: InputSchema,
   call: async (args: unknown, _meta?: unknown) => {
     try {
@@ -56,6 +59,7 @@ const tool: ToolDefinition = {
           transactions: [],
           count: 0,
           totalAmount: 0,
+          hasMore: false,
           amountRange: {
             min: input.minAmount,
             max: input.maxAmount,
@@ -63,8 +67,33 @@ const tool: ToolDefinition = {
         };
       }
       
+      // #750: resolve the category BEFORE expanding, so an unknown name returns its existing error
+      // result and nothing is expanded. A split parent has a null category, so with a category
+      // filter the split is replaced by its children before the amount filters run (an amount
+      // filter then compares with the child amount).
+      let categoryIds: Set<string> | undefined;
+      if (input.categoryName) {
+        const categories = await adapter.getCategories();
+        const matched = idSetByName(categories, input.categoryName);
+        if (matched.size === 0) {
+          // Category not found - return empty
+          return {
+            transactions: [],
+            count: 0,
+            totalAmount: 0,
+            hasMore: false,
+            amountRange: {
+              min: input.minAmount,
+              max: input.maxAmount,
+            },
+            error: `Category "${input.categoryName}" not found`,
+          };
+        }
+        categoryIds = matched;
+      }
+
       // Apply JavaScript filters
-      let filtered = allTransactions;
+      let filtered = categoryIds ? expandSplitsForSearch(allTransactions).rows : allTransactions;
       
       // Filter by absolute amount (if specified, this takes precedence)
       if (input.absoluteAmount !== undefined) {
@@ -80,27 +109,9 @@ const tool: ToolDefinition = {
         }
       }
       
-      // Filter by category name (need to lookup category ID)
-      if (input.categoryName) {
-        const categories = await adapter.getCategories();
-        const category = categories.find((c: any) =>
-          c.name && c.name.toLowerCase() === input.categoryName!.toLowerCase()
-        );
-        if (category) {
-          filtered = filtered.filter((t: any) => t.category === category.id);
-        } else {
-          // Category not found - return empty
-          return {
-            transactions: [],
-            count: 0,
-            totalAmount: 0,
-            amountRange: {
-              min: input.minAmount,
-              max: input.maxAmount,
-            },
-            error: `Category "${input.categoryName}" not found`,
-          };
-        }
+      // Filter by category (resolved above)
+      if (categoryIds) {
+        filtered = filtered.filter((t: any) => categoryIds.has(t.category));
       }
       
       // Sort by amount descending and apply limit
@@ -110,7 +121,9 @@ const tool: ToolDefinition = {
         return amountB - amountA;
       });
       
+      // #755: computed against the slice, so it agrees with the rows returned even for a negative limit.
       const limited = filtered.slice(0, input.limit || 100);
+      const hasMore = filtered.length > limited.length;
       
       // Enrich transactions with account names (listing already in hand, see above)
       const accountMap = new Map(accounts.map((acc: any) => [acc.id, acc.name]));
@@ -127,6 +140,7 @@ const tool: ToolDefinition = {
         transactions: enrichedTransactions,
         count: enrichedTransactions.length,
         totalAmount,
+        hasMore,
         amountRange: input.absoluteAmount !== undefined 
           ? { absolute: input.absoluteAmount }
           : { min: input.minAmount, max: input.maxAmount },
@@ -144,6 +158,7 @@ const tool: ToolDefinition = {
         transactions: [],
         count: 0,
         totalAmount: 0,
+        hasMore: false,
         amountRange: {},
         error: `search_by_amount failed: ${message}`,
       };

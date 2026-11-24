@@ -10,6 +10,10 @@ Fiwell v2 is itself a fork of Actual Budget ([danielkuhnen/actual](https://githu
 - `fiwell` is what we deploy. It is pinned to a reviewed upstream release tag plus the
   Fiwell-only files below. Changes reach it through pull requests.
 
+`fiwell` is currently pinned to upstream **v0.36.1**. Since v0.29 the server publishes the
+compact tool surface by default (15 tools over the same 85 operations), which suits
+claude.ai better than the 85 legacy `actual_*` tools.
+
 Keep Fiwell changes in new files where possible (a new tool is one new file in
 `src/tools/`), so updating from upstream stays a clean merge. Fixes that are not
 Fiwell-specific should go upstream as a pull request instead.
@@ -38,6 +42,15 @@ tenant. Auth0 needs:
 `AUTH_BUDGET_ACL` must list the Auth0 user ids allowed in. Everyone else who can sign in to
 the tenant gets no budget. Leaving it unset or `{}` would let every Auth0 user read every
 budget, because the server reaches Actual with the sync-server password.
+
+## Later: a budget API key instead of the sync-server password
+
+The MCP logs in to the sync-server with its password, which opens every budget on that
+server. Upstream Actual (after 26.11.0) adds budget-scoped API keys, created and revoked
+under **Settings → General → Security → API keys** and passed to `@actual-app/api` as
+`sessionToken`. Once the Fiwell sync-server includes them, the MCP can use a key that only
+opens the staging budget. This server does not read a session token yet, so that needs a
+small change to how it calls `api.init`, best sent upstream.
 
 ## Updating to a new upstream release
 

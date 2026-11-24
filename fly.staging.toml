@@ -25,7 +25,7 @@ primary_region = 'cdg'
   dockerfile = 'Dockerfile'
 
   [build.args]
-    VERSION = '0.27.1-fiwell'
+    VERSION = '0.36.1-fiwell'
 
 [deploy]
   strategy = 'immediate'
